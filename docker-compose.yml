@@ -1,0 +1,50 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ballast
+      POSTGRES_PASSWORD: ballast
+      POSTGRES_DB: ballast
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./server/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ballast"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  ballast-server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    command: ["./ballast-server", "-config", "/etc/ballast/ballast.yaml"]
+    environment:
+      BALLAST_JWT_SECRET: ballast-dev-secret-change-me
+      DATABASE_DSN: postgres://ballast:ballast@postgres:5432/ballast?sslmode=disable
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./server/configs/ballast.yaml:/etc/ballast/ballast.yaml:ro
+      - ./policies:/etc/ballast/policies:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    environment:
+      NEXT_PUBLIC_API_BASE: http://localhost:8080
+    ports:
+      - "3000:3000"
+    depends_on:
+      - ballast-server
+
+volumes:
+  pgdata:

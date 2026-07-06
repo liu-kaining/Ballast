@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+package ballast.harness.v1;
+
+option go_package = "github.com/ballast/harness-agent/internal/proto/harnessv1;harnessv1";
+
+// Harness-Agent 与 Ballast 控制面之间的契约。
+// Harness 作为 gRPC server 运行在沙箱内，控制面作为 client 下发控制信号；
+// 命令上报走双向流 ReportCommand / ControlSignal。
+
+// CommandContext 对应 spec/INIT.md 第 237-244 行。
+message CommandContext {
+  string session_id = 1;
+  string user = 2;
+  string agent_name = 3;
+  string command = 4;     // OpenCode 尝试执行的 Bash 原始命令
+  repeated string args = 5;
+  repeated string env = 6;
+}
+
+// Decision 控制面返回的决策，对齐 policy.Decision。
+enum Decision {
+  DECISION_UNSPECIFIED = 0;
+  APPROVE = 1;
+  DENY = 2;
+  SUSPEND = 3;  // 触发人工审批断点
+}
+
+message ReportRequest {
+  CommandContext command = 1;
+}
+
+message ReportResponse {
+  Decision decision = 1;
+  string reason = 2;
+}
+
+// 控制面 -> Harness 的控制信号
+message ControlSignal {
+  string session_id = 1;
+  oneof signal {
+    Suspend suspend = 2;
+    Resume resume = 3;
+    Terminate terminate = 4;
+  }
+}
+
+message Suspend {}
+message Resume {
+  string approver = 1;
+}
+message Terminate {
+  string reason = 1;
+}
+
+message Ack {
+  bool ok = 1;
+  string message = 2;
+}
+
+// TTY 流帧（Harness -> 控制面），双向流。
+message TTYFrame {
+  string session_id = 1;
+  bytes data = 2;
+  bool stderr = 3;
+}
+
+service HarnessService {
+  // 单条命令上报（请求-响应）。
+  rpc ReportCommand(ReportRequest) returns (ReportResponse);
+
+  // 双向流：上行 TTY 帧，下行控制信号。
+  rpc Stream(stream TTYFrame) returns (stream ControlSignal);
+}

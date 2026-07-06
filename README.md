@@ -1,1 +1,169 @@
 # Ballast
+
+> AI 时代云原生基础设施的安全自愈与演进底座（Harness）。
+> 让每一家企业都敢于、合规地、无风险地在生产环境释放大模型智能体的生产力。
+
+Ballast 解决"AI 引擎高效率"与"生产环境高风险"之间的终极矛盾：
+视 OpenCode 为最锋利的"矛"（极致执行与代码重构力），视 Ballast 为最坚固的"盾"
+（物理沙箱与指令级熔断网关）。唯有盾足够坚固，矛才敢放手冲锋。
+
+完整理念与产品需求见 [`spec/INIT.md`](spec/INIT.md)。
+
+---
+
+## 当前版本：v0.1 — 控制面骨架与底层基建
+
+v0.1 聚焦打通"控制面 → 隔离沙箱 → 意图驱动排障 → 变更策略拦截 → 人工断点审批 → 全量审计"的最小闭环，
+OpenCode 引擎以 **Mock** 占位，沙箱运行时以 **Docker** 实现，安全策略以 **OPA/Rego** 落地。
+
+### v0.1 范围
+
+| 模块 | 状态 | 说明 |
+| --- | --- | --- |
+| Go 控制面后端 | ✅ | REST + WebSocket，`server/` |
+| Next.js 15 前端工作区 | ✅ | 会话列表 + 三栏布局（Reason Tree / Xterm.js / Approve），`web/` |
+| PostgreSQL 数据层 | ✅ | 4 张核心表（sessions/trigger_rules/skills/audit_logs），`server/migrations/` |
+| SandboxRuntime SPI + Docker | ✅ | 接口 + Docker 实现，E2B 留作扩展点，`server/internal/runtime/` |
+| Harness-Agent（PTY 劫持 + 指令拦截） | ✅ | `harness-agent/`，gRPC proto 契约已定义，v0.1 通信走 HTTP JSON |
+| OPA 策略引擎 | ✅ | Rego 热加载，三决策路径（APPROVE/DENY/SUSPEND）单测覆盖，`server/internal/policy/` |
+| Mock OpenCode 引擎 | ✅ | 进程内剧本推进，模拟 K8s CrashLoopBackOff 排障，`server/internal/opencode/mock/` |
+| 沙箱基础镜像 | ✅ | 预装 mock-opencode + harness-agent + 占位 CLI，`sandbox-image/` |
+| 端到端闭环 | ✅ | 创建会话 → 拉起 → 排障 → 拦截 `kubectl apply` → SUSPEND → Approve → Resume → 销毁 |
+
+### 明确不在 v0.1（留待 v0.2+）
+
+Webhook/Cron 自动路由、Vault JIT 真实对接、真实 OpenCode 引擎接入、Skill IDE、
+MCP 插件中心 Web UI、E2B Firecracker Runtime、Web-TTY 双向接管、飞书/钉钉审批推送、Git PR 自动提交。
+详见 [`docs/roadmap.md`](docs/roadmap.md)。
+
+---
+
+## 架构
+
+```mermaid
+flowchart TB
+    subgraph cp [控制面 Ballast Control Plane]
+        WebUI[Next.js 15 前端<br/>会话列表 + 终端预览 + 审批按钮]
+        GoSrv[Go Server Engine<br/>REST + WebSocket API]
+        OPA[OPA Policy Decision Point<br/>Rego 策略加载与求值]
+        DB[(PostgreSQL<br/>sessions/skills/audit_logs)]
+        MockOC[Mock OpenCode Engine<br/>模拟 /session /event SSE]
+    end
+
+    subgraph sb [边缘执行面 Sandbox]
+        Harness[Harness-Agent<br/>PTY Master + 指令拦截 Guard]
+        MockProc[mock-opencode<br/>替代真实 opencode]
+    end
+
+    WebUI <-->|REST/WS| GoSrv
+    GoSrv <-->|进程内| MockOC
+    GoSrv <-->|Docker API| Harness
+    GoSrv --> OPA
+    GoSrv --> DB
+    Harness -->|PTY Slave| MockProc
+    Harness -->|指令上下文| GoSrv
+    GoSrv -->|EvaluateCommand| OPA
+```
+
+---
+
+## 目录结构
+
+```
+Ballast/
+├── spec/INIT.md                       # 项目核心基石文档（理念/PRD/架构/详细设计/配置）
+├── docs/
+│   ├── opencode-protocol-research.md  # OpenCode 协议调研 spike 产出
+│   └── roadmap.md                     # v0.2+ 路线图
+├── server/                            # Go 控制面后端
+│   ├── cmd/ballast-server/            # 入口
+│   ├── internal/
+│   │   ├── api/                       # REST + WebSocket handlers
+│   │   ├── config/                    # ballast.yaml 解析
+│   │   ├── domain/                    # 领域模型（Session/Skill/AuditLog）
+│   │   ├── orchestrator/              # 会话生命周期编排 + WS Hub
+│   │   ├── policy/                    # PolicyEngine 接口 + OPA 实现
+│   │   ├── opencode/                  # opencode.Engine 接口 + Mock
+│   │   ├── runtime/                   # SandboxRuntime SPI + Docker 实现
+│   │   ├── store/                     # PostgreSQL 数据访问层（pgx）
+│   │   └── harness/                   # （预留）控制面侧 harness 通信
+│   ├── migrations/                    # 4 张核心表 SQL
+│   └── configs/ballast.yaml           # 主配置样例
+├── harness-agent/                     # 沙箱内侧插桩网关
+│   ├── cmd/harness-agent/
+│   ├── internal/pty/                  # PTY master 劫持（creack/pty）
+│   ├── internal/guard/                # 指令拦截 + 控制面上报
+│   └── internal/proto/harness.proto   # gRPC 契约（v0.2 启用）
+├── sandbox-image/                     # 沙箱基础镜像
+│   ├── Dockerfile                     # 预装 mock-opencode + harness-agent + 占位 CLI
+│   ├── mock-opencode                  # 模拟 opencode serve 的 Python 脚本
+│   └── .opencode/skills/              # Skill 挂载点样例
+├── policies/                          # OPA Rego 策略文件
+│   └── k8s_prod_write_intercept.rego  # spec 中的样例策略
+├── web/                               # Next.js 15 前端
+│   ├── app/
+│   │   ├── sessions/page.tsx          # 会话列表
+│   │   └── sessions/[id]/page.tsx     # 三栏工作区
+│   ├── components/                    # ReasonTree / Terminal(xterm) / ApproveBar
+│   └── lib/api.ts                     # API + WS 客户端
+├── docker-compose.yml                 # PostgreSQL + Server + Web 本地一键起
+└── Makefile                           # make backend / frontend / sandbox-image / dev / test
+```
+
+---
+
+## 本地起服务
+
+需要：Go 1.22+、Node 22+、Docker（用于沙箱镜像与 compose）。
+
+```bash
+# 1. 拉依赖
+cd server && go mod tidy && cd ..
+cd harness-agent && go mod tidy && cd ..
+cd web && npm install && cd ..
+
+# 2. 全栈起（PostgreSQL + Ballast Server + Web）
+docker compose up -d --build
+# 或仅起数据库，后端/前端本机直跑：
+docker compose up -d postgres
+make backend-run   # -> http://localhost:8080
+make frontend-dev  # -> http://localhost:3000
+
+# 3. 构建沙箱基础镜像
+make sandbox-image
+```
+
+打开 http://localhost:3000 进入自主运维工作区，"拉起沙箱会话"即可走通端到端闭环：
+Mock 引擎吐出 Reason Tree → `kubectl apply` 触发灰名单 → 会话 SUSPENDED →
+右侧 Approve 放行 → Resume → 销毁。
+
+---
+
+## API 速览
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `GET` | `/healthz` | 健康检查 |
+| `GET` | `/api/sessions?status=&limit=&offset=` | 会话列表 |
+| `POST` | `/api/sessions` | 创建会话（拉起沙箱 + 引擎） |
+| `GET` | `/api/sessions/{id}` | 会话详情 |
+| `POST` | `/api/sessions/{id}/approve` | 人工放行被挂起的命令 |
+| `POST` | `/api/sessions/{id}/resume` | 等价 approve |
+| `POST` | `/api/sessions/{id}/destroy` | 销毁沙箱 |
+| `WS` | `/api/sessions/{id}/ws` | 实时事件流（reason.step / tool.call / policy.decision / policy.resumed） |
+| `POST` | `/api/internal/harness/report` | harness-agent guard 上报命令，返回 OPA 决策 |
+
+---
+
+## 安全红线（来自 spec）
+
+- 无监督/无审批的生产写操作：**绝不**
+- OpenCode 直接在管理端宿主机执行本地 Shell：**绝不**
+- 全自动黑盒自愈：**绝不**，每一步变更必须可视、可卡口
+- 替代人类承担最终法律责任：**绝不**，AI 永远是副驾驶
+
+---
+
+## License
+
+见 [LICENSE](LICENSE)。

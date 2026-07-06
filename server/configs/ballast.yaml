@@ -1,0 +1,35 @@
+server:
+  address: "0.0.0.0:8080"
+  environment: "development"
+  jwt_secret: "${BALLAST_JWT_SECRET:-ballast-dev-secret-change-me}"
+
+runtime_provider:
+  type: "docker"  # 可选: 'docker', 'podman', 'e2b_microvm'
+  config:
+    max_cpu_cores: 2
+    max_memory_mb: 2048
+    default_image: "ballast-runner-base:dev"
+    workspace_root: "/tmp/ballast/sandboxes"
+
+credential_center:
+  provider: "hashicorp_vault"  # v0.1 为 stub，不真实对接
+  endpoint: "https://vault.internal.com:8200"
+  auth_token_env: "VAULT_TOKEN"
+
+model_router:
+  default_provider: "deepseek"
+  providers:
+    deepseek:
+      api_base: "https://api.deepseek.com/v1"
+      api_key_env: "DEEPSEEK_API_KEY"
+      default_model: "deepseek-reasoner"
+    openai:
+      api_base: "https://api.openai.com/v1"
+      api_key_env: "OPENAI_API_KEY"
+      default_model: "gpt-4o"
+
+database:
+  dsn: "postgres://ballast:ballast@localhost:5432/ballast?sslmode=disable"
+
+policy:
+  rego_dir: "./policies"

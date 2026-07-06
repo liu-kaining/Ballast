@@ -1,0 +1,6 @@
+bin/
+.cache/
+*.test
+.env
+Dockerfile
+.dockerignore
