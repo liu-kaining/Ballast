@@ -1,6 +1,8 @@
 # OpenCode 协议调研 Spike
 
-> Phase 0 产出。本文件固化 Ballast 与 OpenCode 引擎之间的集成契约，作为 v0.1 Mock 引擎与 v0.2 真实 client 的共同接口基准。
+> Phase 0 产出。本文件固化 Ballast 与真实 OpenCode 引擎之间的 v0.2 集成契约。
+> v0.1 的可运行闭环使用沙箱内 JSON-Line Mock，通过 PTY 与 Harness 做阻断式握手，
+> 不伪装成已经完成的 OpenCode HTTP client。
 
 ## 1. 调研方式
 
@@ -126,7 +128,12 @@ spec 同时提到"PTY Master 伪终端劫持"与"`opencode serve --format json`"
 1. **HTTP/SSE → OpenCode 引擎**：下发意图、订阅 Reason Tree 与 token 事件
 2. **gRPC → Harness-Agent**：下发 Suspend/Resume/Terminate 控制信号、上报被拦截的命令上下文
 
-v0.1 Mock 引擎模拟路径 1；harness-agent 实现路径 2 的 PTY 拦截与控制信号。
+v0.1 中，`mock-opencode` 在每个 `tool.call` 后等待 Harness 经 PTY 写回
+`APPROVE`/`DENY`，Harness 通过带内部凭证的 HTTP 接口向控制面同步事件和命令。
+这条路径用于验证策略与人工审批确实发生在“执行之前”。
+
+v0.2 接入真实 OpenCode 后，控制面将启用本文件中的 HTTP/SSE `Engine` client；
+Harness 控制面通信再按 proto 契约升级为 gRPC 双向流。
 
 ## 7. v0.2 接入清单
 

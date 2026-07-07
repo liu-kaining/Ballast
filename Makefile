@@ -1,7 +1,7 @@
 # Ballast — local development orchestration
 # v0.1 scope: control plane skeleton + harness-agent + sandbox image + web
 
-.PHONY: all backend frontend harness sandbox-image dev test clean fmt vet
+.PHONY: all backend frontend harness sandbox-image dev test e2e-test clean fmt vet
 
 SHELL := /bin/bash
 ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
@@ -35,7 +35,7 @@ harness-test:
 
 # ---------- Sandbox image ----------
 sandbox-image:
-	docker build -t ballast-runner-base:dev sandbox-image/
+	docker build -f sandbox-image/Dockerfile -t ballast-runner-base:dev .
 
 # ---------- Frontend (Next.js 15) ----------
 frontend:
@@ -49,7 +49,10 @@ dev: backend frontend harness
 	@echo "Run 'docker compose up' for full stack, or 'make backend-run' / 'make frontend-dev' separately"
 
 test: backend-test harness-test
-	cd web && npm run test --if-present || true
+	cd web && npm test
+
+e2e-test:
+	./scripts/e2e-smoke.sh
 
 fmt:
 	cd server && $(GO) fmt ./...

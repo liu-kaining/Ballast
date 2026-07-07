@@ -1,7 +1,12 @@
 server:
   address: "0.0.0.0:8080"
-  environment: "development"
+  environment: "${BALLAST_ENVIRONMENT:-development}"
   jwt_secret: "${BALLAST_JWT_SECRET:-ballast-dev-secret-change-me}"
+  admin_token: "${BALLAST_ADMIN_TOKEN:-ballast-dev-admin-token}"
+  internal_token: "${BALLAST_INTERNAL_TOKEN:-ballast-dev-internal-token}"
+  cors_allowed_origins:
+    - "${BALLAST_WEB_ORIGIN:-http://localhost:3000}"
+  cookie_secure: ${BALLAST_COOKIE_SECURE:-false}
 
 runtime_provider:
   type: "docker"  # 可选: 'docker', 'podman', 'e2b_microvm'
@@ -10,6 +15,7 @@ runtime_provider:
     max_memory_mb: 2048
     default_image: "ballast-runner-base:dev"
     workspace_root: "/tmp/ballast/sandboxes"
+    control_plane_url: "${BALLAST_CONTROL_PLANE_URL:-http://host.docker.internal:8080}"
 
 credential_center:
   provider: "hashicorp_vault"  # v0.1 为 stub，不真实对接
@@ -29,7 +35,7 @@ model_router:
       default_model: "gpt-4o"
 
 database:
-  dsn: "postgres://ballast:ballast@localhost:5432/ballast?sslmode=disable"
+  dsn: "${DATABASE_DSN:-postgres://ballast:ballast@localhost:5432/ballast?sslmode=disable}"
 
 policy:
-  rego_dir: "./policies"
+  rego_dir: "${BALLAST_POLICY_DIR:-./policies}"

@@ -13,10 +13,11 @@ import (
 
 	"github.com/ballast/ballast-server/internal/api"
 	"github.com/ballast/ballast-server/internal/config"
-	"github.com/ballast/ballast-server/internal/opencode/mock"
 	"github.com/ballast/ballast-server/internal/orchestrator"
 	"github.com/ballast/ballast-server/internal/policy/opa"
+	dockerruntime "github.com/ballast/ballast-server/internal/runtime/docker"
 	"github.com/ballast/ballast-server/internal/store"
+	"github.com/ballast/ballast-server/migrations"
 )
 
 func main() {
@@ -37,6 +38,9 @@ func main() {
 		logger.Fatalf("connect db: %v (tip: ensure postgres is reachable per docker-compose)", err)
 	}
 	defer dbStore.Close()
+	if err := migrations.Apply(context.Background(), dbStore.Pool()); err != nil {
+		logger.Fatalf("apply database migrations: %v", err)
+	}
 	logger.Printf("db connected")
 
 	// 策略引擎（OPA/Rego）
@@ -50,30 +54,73 @@ func main() {
 	}
 	logger.Printf("policy engine ready (rego_dir=%s)", regoDir)
 
-	// OpenCode 引擎（v0.1 用 Mock）
-	eng := mock.New()
+	// 隔离执行面（Docker CLI + disposable sandbox）
+	runtimeCfg := cfg.RuntimeProvider.Config
+	sandboxRuntime, err := dockerruntime.New(context.Background(), dockerruntime.Config{
+		MaxCPUCores:     runtimeCfg.MaxCPUCores,
+		MaxMemoryMB:     runtimeCfg.MaxMemoryMB,
+		DefaultImage:    runtimeCfg.DefaultImage,
+		WorkspaceRoot:   runtimeCfg.WorkspaceRoot,
+		ControlPlaneURL: runtimeCfg.ControlPlaneURL,
+		InternalToken:   cfg.Server.InternalToken,
+	})
+	if err != nil {
+		logger.Fatalf("initialize sandbox runtime: %v", err)
+	}
+	logger.Printf("sandbox runtime ready (image=%s)", runtimeCfg.DefaultImage)
 
 	// 编排器
-	mgr := orchestrator.New(dbStore, eng, polEng)
+	mgr := orchestrator.New(dbStore.Sessions, dbStore.Audit, sandboxRuntime, polEng, runtimeCfg.DefaultImage)
 
 	// HTTP 路由
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if err := dbStore.Ping(r.Context()); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"status":"unhealthy","database":"unavailable"}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
-	api.NewRouter(mux, mgr, polEng, logger)
+	api.NewRouter(mux, mgr, logger, api.Options{
+		AdminToken:         cfg.Server.AdminToken,
+		SessionSecret:      cfg.Server.JWTSecret,
+		InternalToken:      cfg.Server.InternalToken,
+		CORSAllowedOrigins: cfg.Server.CORSAllowedOrigins,
+		CookieSecure:       cfg.Server.CookieSecure,
+	})
 
 	srv := &http.Server{
 		Addr:              cfg.Server.Address,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	go func() {
 		logger.Printf("ballast-server listening on %s", cfg.Server.Address)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Fatalf("listen: %v", err)
+		}
+	}()
+
+	reloadCtx, stopReload := context.WithCancel(context.Background())
+	defer stopReload()
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-reloadCtx.Done():
+				return
+			case <-ticker.C:
+				if err := polEng.Reload(regoDir); err != nil {
+					logger.Printf("policy reload rejected; keeping last valid policy: %v", err)
+				}
+			}
 		}
 	}()
 
@@ -84,7 +131,10 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = eng.Stop(ctx)
+	stopReload()
+	if err := mgr.Shutdown(ctx); err != nil {
+		logger.Printf("sandbox shutdown error: %v", err)
+	}
 	if err := srv.Shutdown(ctx); err != nil {
 		logger.Printf("shutdown error: %v", err)
 	}

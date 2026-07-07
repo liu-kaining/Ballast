@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -8,43 +6,69 @@ services:
       POSTGRES_PASSWORD: ballast
       POSTGRES_DB: ballast
     ports:
-      - "5432:5432"
+      - "${BALLAST_POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./server/migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ballast"]
       interval: 5s
       timeout: 3s
       retries: 10
 
+  sandbox-image:
+    build:
+      context: .
+      dockerfile: sandbox-image/Dockerfile
+    image: ballast-runner-base:dev
+    entrypoint: ["/bin/true"]
+    restart: "no"
+
   ballast-server:
     build:
       context: ./server
       dockerfile: Dockerfile
-    command: ["./ballast-server", "-config", "/etc/ballast/ballast.yaml"]
+    command: ["-config", "/etc/ballast/ballast.yaml"]
     environment:
       BALLAST_JWT_SECRET: ballast-dev-secret-change-me
+      BALLAST_ADMIN_TOKEN: ballast-dev-admin-token
+      BALLAST_INTERNAL_TOKEN: ballast-dev-internal-token
+      BALLAST_WEB_ORIGIN: ${BALLAST_WEB_ORIGIN:-http://localhost:3000}
+      BALLAST_ENVIRONMENT: development
+      BALLAST_COOKIE_SECURE: "false"
+      BALLAST_POLICY_DIR: /etc/ballast/policies
+      BALLAST_CONTROL_PLANE_URL: http://host.docker.internal:8080
       DATABASE_DSN: postgres://ballast:ballast@postgres:5432/ballast?sslmode=disable
     ports:
-      - "8080:8080"
+      - "${BALLAST_SERVER_PORT:-8080}:8080"
     volumes:
       - ./server/configs/ballast.yaml:/etc/ballast/ballast.yaml:ro
       - ./policies:/etc/ballast/policies:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
+      sandbox-image:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   web:
     build:
       context: ./web
       dockerfile: Dockerfile
-    environment:
-      NEXT_PUBLIC_API_BASE: http://localhost:8080
+      network: host
+      args:
+        NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8080}
     ports:
-      - "3000:3000"
+      - "${BALLAST_WEB_PORT:-3000}:3000"
     depends_on:
-      - ballast-server
+      ballast-server:
+        condition: service_healthy
 
 volumes:
   pgdata:

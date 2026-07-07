@@ -3,16 +3,19 @@
 #   - harness-agent（PTY 劫持 + 指令拦截网关）
 #   - mock-opencode（v0.1 占位，模拟 opencode serve 的最小行为）
 #   - 基础 SRE CLI（kubectl/git/terraform 占位）
-FROM golang:1.22-alpine AS build
+FROM golang:1.26.4-alpine AS build
 WORKDIR /src
 COPY harness-agent/go.mod harness-agent/go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY harness-agent/ ./
-RUN CGO_ENABLED=0 go build -o /harness-agent ./cmd/harness-agent
+RUN --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 go build -o /harness-agent ./cmd/harness-agent
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates git bash socat jq python3 \
-    && ln -sf /bin/bash /bin/sh
+    && ln -sf /bin/bash /bin/sh \
+    && addgroup -S ballast \
+    && adduser -S -G ballast ballast
 
 # 基础 SRE 工具箱占位（v0.2 替换为真实二进制或通过 MCP 注入）
 RUN printf '#!/bin/sh\necho "[mock-kubectl] $*" >&2\nexit 0\n' > /usr/local/bin/kubectl && chmod +x /usr/local/bin/kubectl \
@@ -29,8 +32,11 @@ RUN chmod +x /usr/local/bin/mock-opencode
 # Skill 挂载点（运行时由控制面动态注入到 /workspace/.opencode/skills/）
 RUN mkdir -p /workspace/.opencode/skills
 COPY sandbox-image/.opencode/skills/ /workspace/.opencode/skills/
+RUN chown -R ballast:ballast /workspace
 
 WORKDIR /workspace
-ENV BALAST_SANDBOX=1
+ENV BALLAST_SANDBOX=1
+USER ballast
+HEALTHCHECK --interval=5s --timeout=2s --retries=5 CMD wget -qO- http://127.0.0.1:9091/healthz || exit 1
 # harness-agent 启动后以 mock-opencode 为受控子进程
 ENTRYPOINT ["/usr/local/bin/harness-agent"]

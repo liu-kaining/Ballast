@@ -1,58 +1,118 @@
 #!/usr/bin/env python3
-"""
-mock-opencode: v0.1 占位实现，模拟 `opencode serve --format json` 的最小行为。
-真实 OpenCode 引擎接入留待 v0.2（见 docs/opencode-protocol-research.md）。
+"""Deterministic v0.1 OpenCode substitute.
 
-端点：
-  GET  /doc                       -> 占位 OpenAPI 3.1 spec
-  POST /session                   -> 创建会话，返回 session id
-  POST /session/{id}/message      -> 接受消息，返回 AssistantMessage
-  GET  /event                     -> SSE 事件流（吐预设 Reason Tree 步骤 + 一条 kubectl apply 触发灰名单）
-  POST /mcp                       -> 动态注入 MCP（占位）
+The default ``script`` mode speaks JSON lines over a PTY. Every tool call waits
+for an APPROVE or DENY line from harness-agent before producing a result. A
+small ``serve`` mode remains available for protocol/client development.
 """
+
+import argparse
 import json
 import sys
 import time
 import uuid
-import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 4096
 
-# 预设的 Reason Tree 步骤剧本：模拟一次 K8s CrashLoopBackOff 排障，
-# 最后吐出一条 `kubectl apply` 触发灰名单拦截。
-SCRIPTED_EVENTS = [
+def emit(event_type, properties):
+    print(
+        json.dumps(
+            {"type": event_type, "properties": properties},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
+
+
+def gated_tool_call(command, simulated_stdout):
+    emit("tool.call", {"tool": "bash", "command": command})
+    decision = sys.stdin.readline().strip().upper()
+    if decision != "APPROVE":
+        emit(
+            "tool.result",
+            {
+                "command": command,
+                "decision": "DENY",
+                "stdout": "",
+                "stderr": "blocked by Ballast policy",
+            },
+        )
+        return False
+    emit(
+        "tool.result",
+        {
+            "command": command,
+            "decision": "APPROVE",
+            "stdout": simulated_stdout,
+            "stderr": "",
+        },
+    )
+    return True
+
+
+def run_script():
+    emit("server.connected", {"server": "mock-opencode", "version": "0.1.0"})
+
+    emit(
+        "reason.step",
+        {
+            "index": 1,
+            "title": "列出异常 Pod",
+            "thought": "执行 kubectl get pods 抓取 CrashLoopBackOff 现场",
+        },
+    )
+    if not gated_tool_call(
+        "kubectl get pods -n prod",
+        "my-app-7b6f4-xz  0/1  CrashLoopBackOff  12  3m",
+    ):
+        return
+
+    emit(
+        "reason.step",
+        {"index": 2, "title": "捞取日志", "thought": "kubectl logs 找根因"},
+    )
+    if not gated_tool_call(
+        "kubectl logs my-app-7b6f4-xz -n prod",
+        "Error: configmap my-app-config not found",
+    ):
+        return
+
+    emit(
+        "reason.step",
+        {
+            "index": 3,
+            "title": "拟修复并应用",
+            "thought": "生成修复 ConfigMap；写操作交由 Ballast 等待人工审批",
+        },
+    )
+    if not gated_tool_call(
+        "kubectl apply -f fixed_cm.yaml",
+        "configmap/my-app-config configured",
+    ):
+        return
+
+    emit(
+        "message.completed",
+        {"role": "assistant", "text": "自愈变更已审批并完成，沙箱可以销毁。"},
+    )
+
+
+PREVIEW_EVENTS = [
     {"type": "server.connected", "properties": {"server": "mock-opencode", "version": "0.1.0"}},
-    {"type": "reason.step", "properties": {"index": 1, "title": "列出异常 Pod", "thought": "执行 kubectl get pods 抓取 CrashLoopBackOff 现场"}},
-    {"type": "tool.call", "properties": {"tool": "bash", "command": "kubectl get pods -n prod", "stdout": "my-app-7b6f4-xz  0/1  CrashLoopBackOff  12  3m"}},
-    {"type": "reason.step", "properties": {"index": 2, "title": "捞取日志", "thought": "kubectl logs 找根因"}},
-    {"type": "tool.call", "properties": {"tool": "bash", "command": "kubectl logs my-app-7b6f4-xz -n prod", "stdout": "Error: configmap my-app-config not found"}},
-    {"type": "reason.step", "properties": {"index": 3, "title": "拟修复并应用", "thought": "生成修复 cm 并 kubectl apply 自愈"}},
-    {"type": "tool.call", "properties": {"tool": "bash", "command": "kubectl apply -f fixed_cm.yaml", "stdout": ""}},
-    {"type": "message.completed", "properties": {"role": "assistant", "text": "已尝试自愈，等待审批放行。"}},
+    {
+        "type": "reason.step",
+        "properties": {
+            "index": 1,
+            "title": "列出异常 Pod",
+            "thought": "执行 kubectl get pods 抓取 CrashLoopBackOff 现场",
+        },
+    },
+    {
+        "type": "tool.call",
+        "properties": {"tool": "bash", "command": "kubectl get pods -n prod"},
+    },
 ]
-
-EVENT_SUBSCRIBERS = []  # list of list[str] queues
-SUBSCRIBERS_LOCK = threading.Lock()
-
-
-def enqueue_event(event):
-    payload = json.dumps(event, ensure_ascii=False)
-    with SUBSCRIBERS_LOCK:
-        for q in EVENT_SUBSCRIBERS:
-            q.append(payload)
-
-
-def scripted_loop():
-    for ev in SCRIPTED_EVENTS:
-        enqueue_event(ev)
-        time.sleep(1.5)
-    # 之后保持连接，周期性发心跳，便于前端持续渲染
-    i = 0
-    while True:
-        time.sleep(10)
-        i += 1
-        enqueue_event({"type": "heartbeat", "properties": {"seq": i}})
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -69,16 +129,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/doc":
-            self._send_json(200, {
-                "openapi": "3.1.0",
-                "info": {"title": "mock-opencode", "version": "0.1.0"},
-                "paths": {
-                    "/session": {"post": {"summary": "create session"}},
-                    "/session/{id}/message": {"post": {"summary": "send message"}},
-                    "/event": {"get": {"summary": "SSE event stream"}},
-                    "/mcp": {"post": {"summary": "inject mcp server"}},
+            self._send_json(
+                200,
+                {
+                    "openapi": "3.1.0",
+                    "info": {"title": "mock-opencode", "version": "0.1.0"},
+                    "paths": {
+                        "/session": {"post": {"summary": "create session"}},
+                        "/session/{id}/message": {"post": {"summary": "send message"}},
+                        "/event": {"get": {"summary": "SSE event stream"}},
+                        "/mcp": {"post": {"summary": "inject mcp server"}},
+                    },
                 },
-            })
+            )
             return
         if self.path == "/event":
             self._handle_sse()
@@ -90,19 +153,22 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length) if length > 0 else b""
         try:
             payload = json.loads(raw.decode("utf-8")) if raw else {}
-        except Exception:
-            payload = {}
+        except ValueError:
+            self._send_json(400, {"error": "invalid json"})
+            return
 
         if self.path == "/session":
-            sid = str(uuid.uuid4())
-            self._send_json(200, {"id": sid, "title": payload.get("title", "untitled")})
+            self._send_json(201, {"id": str(uuid.uuid4()), "title": payload.get("title", "untitled")})
             return
         if self.path.startswith("/session/") and self.path.endswith("/message"):
-            self._send_json(200, {
-                "id": str(uuid.uuid4()),
-                "role": "assistant",
-                "parts": [{"type": "text", "text": "mock response"}],
-            })
+            self._send_json(
+                200,
+                {
+                    "id": str(uuid.uuid4()),
+                    "role": "assistant",
+                    "parts": [{"type": "text", "text": "mock response"}],
+                },
+            )
             return
         if self.path == "/mcp":
             self._send_json(200, {"name": payload.get("name", "unknown"), "status": "connected"})
@@ -113,38 +179,33 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
         self.end_headers()
-        queue = []
-        with SUBSCRIBERS_LOCK:
-            EVENT_SUBSCRIBERS.append(queue)
         try:
-            # 先发首事件确保客户端立即收到 200 + stream
-            self.wfile.write("event: server.connected\ndata: %s\n\n" % json.dumps({"server": "mock-opencode"}))
-            self.wfile.flush()
-            while True:
-                if queue:
-                    payload = queue.pop(0)
-                    evt_type = "message"
-                    # 简化：统一用 message 事件，data 内含 type 字段
-                    self.wfile.write("event: %s\ndata: %s\n\n" % (evt_type, payload))
-                    self.wfile.flush()
-                else:
-                    time.sleep(0.2)
+            for event in PREVIEW_EVENTS:
+                data = json.dumps(event, ensure_ascii=False)
+                frame = f"event: {event['type']}\ndata: {data}\n\n".encode("utf-8")
+                self.wfile.write(frame)
+                self.wfile.flush()
+                time.sleep(0.05)
         except (BrokenPipeError, ConnectionResetError):
-            pass
-        finally:
-            with SUBSCRIBERS_LOCK:
-                if queue in EVENT_SUBSCRIBERS:
-                    EVENT_SUBSCRIBERS.remove(queue)
+            return
+
+
+def serve(port):
+    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    print(f"[mock-opencode] listening on :{port}", file=sys.stderr)
+    server.serve_forever()
 
 
 def main():
-    t = threading.Thread(target=scripted_loop, daemon=True)
-    t.start()
-    srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"[mock-opencode] listening on :{PORT}", file=sys.stderr)
-    srv.serve_forever()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=("script", "serve"), default="script")
+    parser.add_argument("--port", type=int, default=4096)
+    args = parser.parse_args()
+    if args.mode == "serve":
+        serve(args.port)
+    else:
+        run_script()
 
 
 if __name__ == "__main__":

@@ -3,12 +3,6 @@
 import { useMemo } from "react";
 import type { EventEnvelope } from "@/lib/api";
 
-interface ReasonStep {
-  index: number;
-  title: string;
-  thought: string;
-}
-
 interface Props {
   events: EventEnvelope[];
 }
@@ -57,6 +51,11 @@ export default function ReasonTree({ events }: Props) {
                         {t.stdout}
                       </pre>
                     )}
+                    {t.stderr && (
+                      <pre style={{ margin: "4px 0 0", color: "var(--danger)", whiteSpace: "pre-wrap" }}>
+                        {t.stderr}
+                      </pre>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -73,20 +72,20 @@ interface AggStep {
   index: number;
   title: string;
   thought: string;
-  tools: { command: string; stdout: string }[];
+  tools: { command: string; stdout: string; stderr: string }[];
 }
 
 function aggregate(events: EventEnvelope[]): AggStep[] {
   const steps: AggStep[] = [];
-  let pendingTools: { command: string; stdout: string }[] = [];
+  let pendingTools: { command: string; stdout: string; stderr: string }[] = [];
   for (const ev of events) {
     if (ev.type === "reason.step") {
       const p = ev.data || {};
       const step: AggStep = {
         key: `step-${p.index}-${steps.length}`,
-        index: p.index ?? steps.length + 1,
-        title: p.title ?? "",
-        thought: p.thought ?? "",
+        index: typeof p.index === "number" ? p.index : steps.length + 1,
+        title: typeof p.title === "string" ? p.title : "",
+        thought: typeof p.thought === "string" ? p.thought : "",
         tools: pendingTools,
       };
       pendingTools = [];
@@ -95,9 +94,27 @@ function aggregate(events: EventEnvelope[]): AggStep[] {
       const p = ev.data || {};
       // tool.call 出现在 reason.step 之前时挂到下一步；否则挂到最后一步
       if (steps.length === 0) {
-        pendingTools.push({ command: p.command ?? "", stdout: p.stdout ?? "" });
+        pendingTools.push({
+          command: typeof p.command === "string" ? p.command : "",
+          stdout: typeof p.stdout === "string" ? p.stdout : "",
+          stderr: "",
+        });
       } else {
-        steps[steps.length - 1].tools.push({ command: p.command ?? "", stdout: p.stdout ?? "" });
+        steps[steps.length - 1].tools.push({
+          command: typeof p.command === "string" ? p.command : "",
+          stdout: typeof p.stdout === "string" ? p.stdout : "",
+          stderr: "",
+        });
+      }
+    } else if (ev.type === "tool.result") {
+      const p = ev.data || {};
+      for (let i = steps.length - 1; i >= 0; i--) {
+        const tool = [...steps[i].tools].reverse().find((candidate) => candidate.command === p.command);
+        if (tool) {
+          tool.stdout = typeof p.stdout === "string" ? p.stdout : "";
+          tool.stderr = typeof p.stderr === "string" ? p.stderr : "";
+          break;
+        }
       }
     }
   }

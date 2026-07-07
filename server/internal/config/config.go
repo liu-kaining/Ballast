@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -10,39 +11,51 @@ import (
 
 // Config 对应 /etc/ballast/ballast.yaml 的全局配置。
 type Config struct {
-	Server            ServerConfig            `yaml:"server"`
-	RuntimeProvider   RuntimeProviderConfig   `yaml:"runtime_provider"`
-	CredentialCenter  CredentialCenterConfig  `yaml:"credential_center"`
-	ModelRouter       ModelRouterConfig        `yaml:"model_router"`
-	Database          DatabaseConfig          `yaml:"database"`
-	Policy            PolicyConfig            `yaml:"policy"`
+	Server           ServerConfig           `yaml:"server"`
+	RuntimeProvider  RuntimeProviderConfig  `yaml:"runtime_provider"`
+	CredentialCenter CredentialCenterConfig `yaml:"credential_center"`
+	ModelRouter      ModelRouterConfig      `yaml:"model_router"`
+	Database         DatabaseConfig         `yaml:"database"`
+	Policy           PolicyConfig           `yaml:"policy"`
 }
 
 type ServerConfig struct {
-	Address     string `yaml:"address"`
-	Environment string `yaml:"environment"`
-	JWTSecret   string `yaml:"jwt_secret"`
+	Address            string   `yaml:"address"`
+	Environment        string   `yaml:"environment"`
+	JWTSecret          string   `yaml:"jwt_secret"`
+	AdminToken         string   `yaml:"admin_token"`
+	InternalToken      string   `yaml:"internal_token"`
+	CORSAllowedOrigins []string `yaml:"cors_allowed_origins"`
+	CookieSecure       bool     `yaml:"cookie_secure"`
 }
 
 type RuntimeProviderConfig struct {
-	Type   string            `yaml:"type"`
-	Config map[string]any    `yaml:"config"`
+	Type   string        `yaml:"type"`
+	Config RuntimeConfig `yaml:"config"`
+}
+
+type RuntimeConfig struct {
+	MaxCPUCores     int    `yaml:"max_cpu_cores"`
+	MaxMemoryMB     int    `yaml:"max_memory_mb"`
+	DefaultImage    string `yaml:"default_image"`
+	WorkspaceRoot   string `yaml:"workspace_root"`
+	ControlPlaneURL string `yaml:"control_plane_url"`
 }
 
 type CredentialCenterConfig struct {
-	Provider    string `yaml:"provider"`
-	Endpoint    string `yaml:"endpoint"`
+	Provider     string `yaml:"provider"`
+	Endpoint     string `yaml:"endpoint"`
 	AuthTokenEnv string `yaml:"auth_token_env"`
 }
 
 type ModelRouterConfig struct {
-	DefaultProvider string                       `yaml:"default_provider"`
+	DefaultProvider string                         `yaml:"default_provider"`
 	Providers       map[string]ModelProviderConfig `yaml:"providers"`
 }
 
 type ModelProviderConfig struct {
-	APIBase     string `yaml:"api_base"`
-	APIKeyEnv   string `yaml:"api_key_env"`
+	APIBase      string `yaml:"api_base"`
+	APIKeyEnv    string `yaml:"api_key_env"`
 	DefaultModel string `yaml:"default_model"`
 }
 
@@ -82,15 +95,57 @@ func (c *Config) validate() error {
 	if c.Database.DSN == "" {
 		return fmt.Errorf("database.dsn is required")
 	}
+	if c.Server.JWTSecret == "" {
+		return fmt.Errorf("server.jwt_secret is required")
+	}
+	if c.Server.AdminToken == "" {
+		return fmt.Errorf("server.admin_token is required")
+	}
+	if c.Server.InternalToken == "" {
+		return fmt.Errorf("server.internal_token is required")
+	}
+	if c.RuntimeProvider.Type != "docker" {
+		return fmt.Errorf("runtime_provider.type %q is not supported", c.RuntimeProvider.Type)
+	}
+	if c.RuntimeProvider.Config.DefaultImage == "" {
+		return fmt.Errorf("runtime_provider.config.default_image is required")
+	}
+	if c.RuntimeProvider.Config.ControlPlaneURL == "" {
+		return fmt.Errorf("runtime_provider.config.control_plane_url is required")
+	}
+	if c.Server.Environment == "production" {
+		if !c.Server.CookieSecure {
+			return fmt.Errorf("server.cookie_secure must be true in production")
+		}
+		for name, value := range map[string]string{
+			"server.jwt_secret":     c.Server.JWTSecret,
+			"server.admin_token":    c.Server.AdminToken,
+			"server.internal_token": c.Server.InternalToken,
+		} {
+			if strings.Contains(strings.ToLower(value), "dev") || len(value) < 24 {
+				return fmt.Errorf("%s must be a non-development secret of at least 24 characters in production", name)
+			}
+		}
+	}
 	return nil
 }
 
-// expandEnv 替换 ${VAR} 占位符。未设置的变量替换为空串。
+var bracedEnvPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}`)
+
+// expandEnv 替换 $VAR、${VAR} 和 ${VAR:-fallback}。
+// 带 :- 的表达式在变量未设置或为空时使用 fallback。
 func expandEnv(s string) string {
-	return os.Expand(s, func(key string) string {
-		// os.Expand 默认处理 $VAR 与 ${VAR}；这里统一处理两种形式。
-		return os.Getenv(key)
+	withDefaults := bracedEnvPattern.ReplaceAllStringFunc(s, func(expr string) string {
+		match := bracedEnvPattern.FindStringSubmatch(expr)
+		if value := strings.TrimSpace(os.Getenv(match[1])); value != "" {
+			return value
+		}
+		if match[2] != "" {
+			return match[3]
+		}
+		return ""
 	})
+	return os.ExpandEnv(withDefaults)
 }
 
 // EnvOrPlaceholder 供配置值引用环境变量时使用的小工具。

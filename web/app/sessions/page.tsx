@@ -5,6 +5,10 @@ import Link from "next/link";
 import {
   listSessions,
   createSession,
+  login,
+  logout,
+  APIError,
+  errorMessage,
   type Session,
   type SessionStatus,
 } from "@/lib/api";
@@ -22,6 +26,8 @@ export default function SessionsPage() {
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState("K8s CrashLoopBackOff 排障");
+  const [authRequired, setAuthRequired] = useState(false);
+  const [token, setToken] = useState("");
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -29,8 +35,11 @@ export default function SessionsPage() {
     try {
       const list = await listSessions();
       setSessions(list);
-    } catch (e: any) {
-      setError(e.message || String(e));
+    } catch (e: unknown) {
+      if (e instanceof APIError && e.status === 401) {
+        setAuthRequired(true);
+      }
+      setError(errorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -46,11 +55,32 @@ export default function SessionsPage() {
     try {
       await createSession(title);
       await refresh();
-    } catch (e: any) {
-      setError(e.message || String(e));
+    } catch (e: unknown) {
+      setError(errorMessage(e));
     } finally {
       setCreating(false);
     }
+  }
+
+  async function handleLogin() {
+    setCreating(true);
+    setError(null);
+    try {
+      await login(token);
+      setToken("");
+      setAuthRequired(false);
+      await refresh();
+    } catch (e: unknown) {
+      setError(errorMessage(e));
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function handleLogout() {
+    await logout();
+    setSessions([]);
+    setAuthRequired(true);
   }
 
   return (
@@ -64,15 +94,50 @@ export default function SessionsPage() {
         }}
       >
         <h1 style={{ fontSize: 24, margin: 0 }}>会话列表</h1>
-        <button
-          onClick={refresh}
-          style={btnStyle()}
-          disabled={loading}
-        >
-          刷新
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          {!authRequired && <button onClick={handleLogout} style={btnStyle()}>退出</button>}
+          <button onClick={refresh} style={btnStyle()} disabled={loading}>刷新</button>
+        </div>
       </header>
 
+      {authRequired && (
+        <section
+          style={{
+            background: "var(--panel)",
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+            padding: 20,
+            marginBottom: 24,
+          }}
+        >
+          <h2 style={{ marginTop: 0, fontSize: 18 }}>控制台认证</h2>
+          <p style={{ color: "var(--muted)", fontSize: 13 }}>
+            输入 Ballast 管理令牌。令牌仅用于登录请求，后续由 HttpOnly 会话 Cookie 认证。
+          </p>
+          <div style={{ display: "flex", gap: 12 }}>
+            <input
+              type="password"
+              value={token}
+              onChange={(event) => setToken(event.target.value)}
+              onKeyDown={(event) => event.key === "Enter" && handleLogin()}
+              placeholder="管理令牌"
+              style={{
+                flex: 1,
+                background: "var(--panel-2)",
+                border: "1px solid var(--border)",
+                borderRadius: 6,
+                color: "var(--text)",
+                padding: "10px 12px",
+              }}
+            />
+            <button onClick={handleLogin} disabled={!token || creating} style={btnStyle(true)}>
+              登录
+            </button>
+          </div>
+        </section>
+      )}
+
+      {!authRequired && (
       <section
         style={{
           background: "var(--panel)",
@@ -103,6 +168,7 @@ export default function SessionsPage() {
           {creating ? "拉起中..." : "拉起沙箱会话"}
         </button>
       </section>
+      )}
 
       {error && (
         <div
@@ -120,7 +186,7 @@ export default function SessionsPage() {
         </div>
       )}
 
-      <section
+      {!authRequired && <section
         style={{
           background: "var(--panel)",
           border: "1px solid var(--border)",
@@ -172,7 +238,7 @@ export default function SessionsPage() {
             ))}
           </tbody>
         </table>
-      </section>
+      </section>}
     </main>
   );
 }

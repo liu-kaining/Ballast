@@ -11,44 +11,23 @@ import (
 
 const sampleRego = `package ballast.security
 
-default allow = false
-default action = "SUSPEND"
+default decision = "SUSPEND"
 
-allow {
-	is_safe_command(input.command)
+decision = "APPROVE" {
+	not input.unsafe
+	input.command == "kubectl"
+	input.args[0] == "get"
 }
 
-action = "DENY" {
-	blacklist_commands[_] == input.command
+decision = "DENY" {
+	input.unsafe
 }
 
-action = "SUSPEND" {
-	not is_safe_command(input.command)
-	graylist_commands[_] == input.command
+decision = "DENY" {
+	input.command == "rm"
+	input.args[0] == "-rf"
+	input.args[1] == "/"
 }
-
-is_safe_command(cmd) {
-	safe_commands[_] == cmd
-}
-
-safe_commands = [
-	"kubectl get", "kubectl logs", "kubectl describe", "kubectl top",
-	"git status", "git diff", "git log",
-	"terraform plan", "terraform validate",
-	"ls", "cat", "grep", "awk"
-]
-
-blacklist_commands = [
-	"rm -rf /", "mkfs", "fdisk", "dd",
-	"kubectl delete namespace", "kubectl delete clusterrolebinding",
-	"shutdown", "reboot"
-]
-
-graylist_commands = [
-	"kubectl apply", "kubectl delete", "kubectl patch", "kubectl edit",
-	"terraform apply", "terraform destroy",
-	"git push", "helm upgrade", "helm uninstall"
-]
 `
 
 func writeTempRego(t *testing.T) string {
@@ -65,7 +44,10 @@ func TestEngine_WhitelistApproved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
 	}
-	d, err := e.EvaluateCommand(context.Background(), policy.CommandContext{Command: "kubectl get"})
+	d, err := e.EvaluateCommand(context.Background(), policy.CommandContext{
+		Command: "kubectl",
+		Args:    []string{"get", "pods", "-n", "prod"},
+	})
 	if err != nil {
 		t.Fatalf("eval: %v", err)
 	}
@@ -79,7 +61,10 @@ func TestEngine_BlacklistDenied(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
 	}
-	d, err := e.EvaluateCommand(context.Background(), policy.CommandContext{Command: "rm -rf /"})
+	d, err := e.EvaluateCommand(context.Background(), policy.CommandContext{
+		Command: "rm",
+		Args:    []string{"-rf", "/"},
+	})
 	if err != nil {
 		t.Fatalf("eval: %v", err)
 	}
@@ -93,11 +78,46 @@ func TestEngine_GraylistSuspended(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
 	}
-	d, err := e.EvaluateCommand(context.Background(), policy.CommandContext{Command: "kubectl apply"})
+	d, err := e.EvaluateCommand(context.Background(), policy.CommandContext{
+		Command: "kubectl",
+		Args:    []string{"apply", "-f", "fixed.yaml"},
+	})
 	if err != nil {
 		t.Fatalf("eval: %v", err)
 	}
 	if d != policy.Suspend {
 		t.Fatalf("expected SUSPEND, got %s", d)
+	}
+}
+
+func TestEngine_UnknownCommandSuspended(t *testing.T) {
+	e, err := New(writeTempRego(t))
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	d, err := e.EvaluateCommand(context.Background(), policy.CommandContext{Command: "custom-deployer"})
+	if err != nil {
+		t.Fatalf("eval: %v", err)
+	}
+	if d != policy.Suspend {
+		t.Fatalf("expected SUSPEND, got %s", d)
+	}
+}
+
+func TestEngine_UnsafeCompositionDenied(t *testing.T) {
+	e, err := New(writeTempRego(t))
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	d, err := e.EvaluateCommand(context.Background(), policy.CommandContext{
+		Command: "kubectl",
+		Args:    []string{"get", "pods", "&&", "rm", "-rf", "/"},
+		Unsafe:  true,
+	})
+	if err != nil {
+		t.Fatalf("eval: %v", err)
+	}
+	if d != policy.Deny {
+		t.Fatalf("expected DENY, got %s", d)
 	}
 }

@@ -1,238 +1,394 @@
-// Package orchestrator 编排一次会话的完整生命周期：
-//   会话落库 -> 启动 OpenCode 引擎 -> 订阅事件流 -> 转发到 WebSocket
-//   -> tool.call 命令经 PolicyEngine 求值 -> APPROVE/DENY/SUSPEND
-//   -> SUSPEND 时挂起等待人工 Approve -> Resume -> 审计落库 -> 销毁
+// Package orchestrator owns the complete v0.1 session state machine.
 package orchestrator
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/ballast/ballast-server/internal/domain"
-	"github.com/ballast/ballast-server/internal/opencode"
 	"github.com/ballast/ballast-server/internal/policy"
-	"github.com/ballast/ballast-server/internal/store"
+	"github.com/ballast/ballast-server/internal/runtime"
 )
 
-// Manager 管理所有活跃会话。
-type Manager struct {
-	store   *store.Store
-	engine  opencode.Engine
-	policy  policy.PolicyEngine
-	hub     *Hub
+type SessionRepository interface {
+	Create(context.Context, *domain.Session) error
+	Get(context.Context, string) (*domain.Session, error)
+	List(context.Context, domain.SessionStatus, int, int) ([]*domain.Session, error)
+	UpdateStatus(context.Context, string, domain.SessionStatus) error
+}
 
-	mu       sync.Mutex
+type AuditRepository interface {
+	Append(context.Context, *domain.AuditLog) (int64, error)
+}
+
+type Manager struct {
+	sessionsRepo SessionRepository
+	auditRepo    AuditRepository
+	runtime      runtime.SandboxRuntime
+	policy       policy.PolicyEngine
+	defaultImage string
+	hub          *Hub
+
+	mu       sync.RWMutex
 	sessions map[string]*liveSession
 }
 
 type liveSession struct {
+	mu       sync.RWMutex
 	session  *domain.Session
-	ocID     string // OpenCode 引擎侧会话 ID
-	resumeCh chan string // approver
-	suspendCh chan struct{}
+	instance runtime.SandboxInstance
+	pending  *pendingApproval
+	ctx      context.Context
 	cancel   context.CancelFunc
 }
 
-// New 构造 Manager。
-func New(s *store.Store, eng opencode.Engine, pol policy.PolicyEngine) *Manager {
+type pendingApproval struct {
+	command  string
+	result   chan approvalResult
+	done     chan error
+	approved bool
+}
+
+type approvalResult struct {
+	approver string
+}
+
+func New(
+	sessions SessionRepository,
+	audit AuditRepository,
+	sandboxRuntime runtime.SandboxRuntime,
+	policyEngine policy.PolicyEngine,
+	defaultImage string,
+) *Manager {
 	return &Manager{
-		store:   s,
-		engine:  eng,
-		policy:  pol,
-		hub:     NewHub(),
-		sessions: map[string]*liveSession{},
+		sessionsRepo: sessions,
+		auditRepo:    audit,
+		runtime:      sandboxRuntime,
+		policy:       policyEngine,
+		defaultImage: defaultImage,
+		hub:          NewHub(),
+		sessions:     make(map[string]*liveSession),
 	}
 }
 
-// Hub 返回 WebSocket 广播 hub，供 API 层订阅。
-func (m *Manager) Hub() *Hub { return m.hub }
-
-// CreateSession 创建会话：落库 + 启动引擎 + 事件循环。
 func (m *Manager) CreateSession(ctx context.Context, title, agentImage string) (*domain.Session, error) {
-	sess := &domain.Session{
+	if agentImage == "" {
+		agentImage = m.defaultImage
+	}
+	if agentImage != m.defaultImage {
+		return nil, fmt.Errorf("agent image %q is not registered", agentImage)
+	}
+
+	now := time.Now().UTC()
+	session := &domain.Session{
 		SessionID:   genID(),
 		Title:       title,
 		TriggerType: domain.TriggerManualChat,
 		Status:      domain.SessionRunning,
 		AgentImage:  agentImage,
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
-	if err := m.store.Sessions.Create(ctx, sess); err != nil {
+	if err := m.sessionsRepo.Create(ctx, session); err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
 	}
 
-	ocID, err := m.engine.StartSession(ctx, title, opencode.SessionOpts{})
+	sessionCtx, cancel := context.WithCancel(context.Background())
+	live := &liveSession{session: session, ctx: sessionCtx, cancel: cancel}
+	m.mu.Lock()
+	m.sessions[session.SessionID] = live
+	m.mu.Unlock()
+
+	instance, err := m.runtime.Create(ctx, session.SessionID, agentImage, runtime.Mounts{})
 	if err != nil {
-		_ = m.store.Sessions.UpdateStatus(ctx, sess.SessionID, domain.SessionFailed)
-		return nil, fmt.Errorf("start engine: %w", err)
+		cancel()
+		m.deleteLiveSession(session.SessionID)
+		_ = m.sessionsRepo.UpdateStatus(context.Background(), session.SessionID, domain.SessionFailed)
+		return nil, fmt.Errorf("create sandbox: %w", err)
 	}
+	live.mu.Lock()
+	live.instance = instance
+	live.mu.Unlock()
 
-	lctx, cancel := context.WithCancel(context.Background())
-	ls := &liveSession{
-		session:   sess,
-		ocID:      ocID,
-		resumeCh:  make(chan string, 1),
-		suspendCh: make(chan struct{}, 1),
-		cancel:    cancel,
-	}
-	m.mu.Lock()
-	m.sessions[sess.SessionID] = ls
-	m.mu.Unlock()
-
-	// 触发剧本推进
-	if _, err := m.engine.Prompt(lctx, ocID, title); err != nil {
-		return nil, fmt.Errorf("prompt: %w", err)
-	}
-
-	go m.eventLoop(lctx, ls)
-
-	return sess, nil
-}
-
-// GetSession 从内存取活跃会话；若不在内存则回查 store。
-func (m *Manager) GetSession(ctx context.Context, id string) (*domain.Session, error) {
-	m.mu.Lock()
-	ls, ok := m.sessions[id]
-	m.mu.Unlock()
-	if ok {
-		return ls.session, nil
-	}
-	return m.store.Sessions.Get(ctx, id)
-}
-
-// ListSessions 列出会话。
-func (m *Manager) ListSessions(ctx context.Context, status domain.SessionStatus, limit, offset int) ([]*domain.Session, error) {
-	return m.store.Sessions.List(ctx, status, limit, offset)
-}
-
-// Approve 人工放行被挂起的会话。
-func (m *Manager) Approve(ctx context.Context, id, approver string) error {
-	m.mu.Lock()
-	ls, ok := m.sessions[id]
-	m.mu.Unlock()
-	if !ok {
-		return fmt.Errorf("session %s not active", id)
-	}
-	select {
-	case ls.resumeCh <- approver:
-	default:
-		return fmt.Errorf("session %s not suspended", id)
-	}
-	// 审计：记录放行
-	_, _ = m.store.Audit.Append(ctx, &domain.AuditLog{
-		SessionID:       id,
-		LoopIndex:       1,
-		ExecutedCommand: "human-approve",
-		PolicyDecision:  domain.DecisionApprove,
-		Approver:        approver,
+	m.hub.Broadcast(session.SessionID, EventEnvelope{
+		Type: "session.started",
+		Data: mustJSON(map[string]string{
+			"session_id": session.SessionID,
+			"sandbox_ip": instance.GetIP(),
+		}),
 	})
-	_ = m.store.Sessions.UpdateStatus(ctx, id, domain.SessionRunning)
-	return nil
+	return cloneSession(session), nil
 }
 
-// Destroy 销毁会话：停引擎、取消循环、更新状态。
-func (m *Manager) Destroy(ctx context.Context, id string) error {
-	m.mu.Lock()
-	ls, ok := m.sessions[id]
-	if ok {
-		delete(m.sessions, id)
+func (m *Manager) GetSession(ctx context.Context, id string) (*domain.Session, error) {
+	if live := m.liveSession(id); live != nil {
+		live.mu.RLock()
+		defer live.mu.RUnlock()
+		return cloneSession(live.session), nil
 	}
-	m.mu.Unlock()
-	if !ok {
+	return m.sessionsRepo.Get(ctx, id)
+}
+
+func (m *Manager) ListSessions(ctx context.Context, status domain.SessionStatus, limit, offset int) ([]*domain.Session, error) {
+	return m.sessionsRepo.List(ctx, status, limit, offset)
+}
+
+// HandleHarnessEvent forwards a trusted sandbox event and completes the
+// session after the controlled child emits message.completed.
+func (m *Manager) HandleHarnessEvent(ctx context.Context, id, eventType string, data json.RawMessage) error {
+	live := m.liveSession(id)
+	if live == nil {
+		return fmt.Errorf("session %s is not active", id)
+	}
+	if !json.Valid(data) {
+		return errors.New("event data is not valid JSON")
+	}
+	switch eventType {
+	case "server.connected", "reason.step", "tool.call", "tool.result", "message.completed", "error":
+	default:
+		return fmt.Errorf("unsupported event type %q", eventType)
+	}
+
+	m.hub.Broadcast(id, EventEnvelope{Type: eventType, Data: data})
+	terminalFailure := eventType == "error"
+	if eventType == "tool.result" {
+		var result struct {
+			Decision string `json:"decision"`
+		}
+		if err := json.Unmarshal(data, &result); err != nil {
+			return fmt.Errorf("decode tool result: %w", err)
+		}
+		terminalFailure = result.Decision == string(policy.Deny)
+	}
+	if terminalFailure {
+		if err := m.setStatus(ctx, live, domain.SessionFailed); err != nil {
+			return err
+		}
+		m.scheduleCleanup(id)
 		return nil
 	}
-	ls.cancel()
-	if stopper, ok := m.engine.(interface{ StopSession(string) }); ok {
-		stopper.StopSession(ls.ocID)
+	if eventType == "message.completed" {
+		if err := m.setStatus(ctx, live, domain.SessionSuccess); err != nil {
+			return err
+		}
+		m.hub.Broadcast(id, EventEnvelope{
+			Type: "session.completed",
+			Data: mustJSON(map[string]string{"status": string(domain.SessionSuccess)}),
+		})
+		m.scheduleCleanup(id)
 	}
-	_ = m.store.Sessions.UpdateStatus(ctx, id, domain.SessionSuccess)
 	return nil
 }
 
-// eventLoop 消费引擎事件流，转发到 hub，并对 tool.call 做策略求值。
-func (m *Manager) eventLoop(ctx context.Context, ls *liveSession) {
-	events, err := m.engine.Events(ctx, ls.ocID)
-	if err != nil {
-		m.hub.Broadcast(ls.session.SessionID, EventEnvelope{Type: "error", Data: mustJSON(map[string]string{"error": err.Error()})})
-		return
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case ev, ok := <-events:
-			if !ok {
-				return
-			}
-			// 转发给前端
-			m.hub.Broadcast(ls.session.SessionID, EventEnvelope{
-				Type: ev.Type,
-				Data: ev.Payload,
-			})
-			// 命令拦截
-			if tc, isTool := opencode.ParseToolCall(ev); isTool && tc.Command != "" {
-				m.handleCommand(ctx, ls, tc)
-			}
-		}
-	}
+func (m *Manager) scheduleCleanup(id string) {
+	time.AfterFunc(250*time.Millisecond, func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = m.finishSession(cleanupCtx, id, false)
+	})
 }
 
-// handleCommand 对一条 tool.call 命令做策略求值并处理决策。
-func (m *Manager) handleCommand(ctx context.Context, ls *liveSession, tc opencode.ToolCallPayload) {
-	cmd, args := splitCmd(tc.Command)
-	dec, err := m.policy.EvaluateCommand(ctx, policy.CommandContext{
-		SessionID: ls.session.SessionID,
-		User:      "opencode-agent",
-		AgentName: "mock-opencode",
-		Command:   cmd,
-		Args:      args,
-		Env:       nil,
+// EvaluateCommand evaluates one intercepted command. SUSPEND keeps the HTTP
+// request open until Approve supplies a decision for this exact command.
+func (m *Manager) EvaluateCommand(ctx context.Context, command policy.CommandContext) (policy.Decision, error) {
+	live := m.liveSession(command.SessionID)
+	if live == nil {
+		return policy.Deny, fmt.Errorf("session %s is not active", command.SessionID)
+	}
+	if command.Command == "" {
+		return policy.Deny, errors.New("command is empty")
+	}
+	command.Command = filepath.Base(command.Command)
+	if containsShellControl(joinCommand(command.Command, command.Args)) {
+		command.Unsafe = true
+	}
+
+	decision, err := m.policy.EvaluateCommand(ctx, command)
+	if err != nil {
+		return policy.Deny, fmt.Errorf("evaluate policy: %w", err)
+	}
+	auditID, err := m.auditRepo.Append(ctx, &domain.AuditLog{
+		SessionID:       command.SessionID,
+		LoopIndex:       1,
+		ModelName:       command.AgentName,
+		ExecutedCommand: joinCommand(command.Command, command.Args),
+		PolicyDecision:  domain.PolicyDecision(decision),
 	})
 	if err != nil {
-		dec = policy.Deny
+		return policy.Deny, fmt.Errorf("write policy audit: %w", err)
 	}
-	audit := &domain.AuditLog{
-		SessionID:       ls.session.SessionID,
-		LoopIndex:       1,
-		ModelName:       "mock-opencode",
-		ExecutedCommand: tc.Command,
-		PolicyDecision:  domain.PolicyDecision(dec),
-	}
-	auditID, _ := m.store.Audit.Append(ctx, audit)
 
-	// 通知前端策略决策
-	m.hub.Broadcast(ls.session.SessionID, EventEnvelope{
+	m.hub.Broadcast(command.SessionID, EventEnvelope{
 		Type: "policy.decision",
 		Data: mustJSON(map[string]any{
 			"audit_id": auditID,
-			"command":  tc.Command,
-			"decision": string(dec),
+			"command":  joinCommand(command.Command, command.Args),
+			"decision": string(decision),
 		}),
 	})
 
-	switch dec {
+	switch decision {
 	case policy.Approve:
-		// 放行
+		return policy.Approve, nil
 	case policy.Deny:
-		_ = m.store.Sessions.UpdateStatus(ctx, ls.session.SessionID, domain.SessionFailed)
+		_ = m.setStatus(context.Background(), live, domain.SessionFailed)
+		return policy.Deny, nil
 	case policy.Suspend:
-		_ = m.store.Sessions.UpdateStatus(ctx, ls.session.SessionID, domain.SessionSuspended)
-		// 阻塞等待放行
-		select {
-		case <-ctx.Done():
-			return
-		case approver := <-ls.resumeCh:
-			m.hub.Broadcast(ls.session.SessionID, EventEnvelope{
-				Type: "policy.resumed",
-				Data: mustJSON(map[string]string{"approver": approver}),
-			})
-		}
+		return m.waitForApproval(ctx, live, command)
+	default:
+		return policy.Deny, fmt.Errorf("unsupported policy decision %q", decision)
 	}
 }
 
-// EventEnvelope 是发给前端 WebSocket 的事件包装。
+func (m *Manager) waitForApproval(ctx context.Context, live *liveSession, command policy.CommandContext) (policy.Decision, error) {
+	pending := &pendingApproval{
+		command: joinCommand(command.Command, command.Args),
+		result:  make(chan approvalResult, 1),
+		done:    make(chan error, 1),
+	}
+	live.mu.Lock()
+	if live.pending != nil {
+		live.mu.Unlock()
+		return policy.Deny, errors.New("another command is already awaiting approval")
+	}
+	live.pending = pending
+	live.mu.Unlock()
+
+	if err := m.setStatus(context.Background(), live, domain.SessionSuspended); err != nil {
+		m.clearPending(live, pending)
+		return policy.Deny, err
+	}
+
+	select {
+	case result := <-pending.result:
+		_, auditErr := m.auditRepo.Append(context.Background(), &domain.AuditLog{
+			SessionID:       command.SessionID,
+			LoopIndex:       1,
+			ModelName:       command.AgentName,
+			ExecutedCommand: pending.command,
+			PolicyDecision:  domain.DecisionApprove,
+			Approver:        result.approver,
+		})
+		if auditErr == nil {
+			auditErr = m.setStatus(context.Background(), live, domain.SessionRunning)
+		}
+		m.clearPending(live, pending)
+		if auditErr != nil {
+			pending.done <- auditErr
+			return policy.Deny, auditErr
+		}
+		m.hub.Broadcast(command.SessionID, EventEnvelope{
+			Type: "policy.resumed",
+			Data: mustJSON(map[string]string{
+				"approver": result.approver,
+				"command":  pending.command,
+			}),
+		})
+		pending.done <- nil
+		return policy.Approve, nil
+	case <-ctx.Done():
+		m.clearPending(live, pending)
+		return policy.Deny, ctx.Err()
+	case <-live.ctx.Done():
+		m.clearPending(live, pending)
+		return policy.Deny, errors.New("session terminated while awaiting approval")
+	}
+}
+
+func (m *Manager) Approve(ctx context.Context, id, approver string) error {
+	live := m.liveSession(id)
+	if live == nil {
+		return fmt.Errorf("session %s is not active", id)
+	}
+
+	live.mu.Lock()
+	pending := live.pending
+	if pending == nil || pending.approved {
+		live.mu.Unlock()
+		return fmt.Errorf("session %s is not suspended", id)
+	}
+	pending.approved = true
+	live.mu.Unlock()
+
+	select {
+	case pending.result <- approvalResult{approver: approver}:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-live.ctx.Done():
+		return errors.New("session terminated")
+	}
+
+	select {
+	case err := <-pending.done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-live.ctx.Done():
+		return errors.New("session terminated")
+	}
+}
+
+func (m *Manager) Destroy(ctx context.Context, id string) error {
+	if m.liveSession(id) == nil {
+		if _, err := m.sessionsRepo.Get(ctx, id); err != nil {
+			return err
+		}
+		return nil
+	}
+	return m.finishSession(ctx, id, true)
+}
+
+func (m *Manager) finishSession(ctx context.Context, id string, userInitiated bool) error {
+	live := m.liveSession(id)
+	if live == nil {
+		return nil
+	}
+	live.cancel()
+	if err := m.runtime.Destroy(ctx, id); err != nil {
+		_ = m.setStatus(context.Background(), live, domain.SessionFailed)
+		return err
+	}
+	if userInitiated {
+		live.mu.RLock()
+		status := live.session.Status
+		live.mu.RUnlock()
+		if status != domain.SessionSuccess && status != domain.SessionFailed {
+			status = domain.SessionFailed
+			if err := m.setStatus(ctx, live, status); err != nil {
+				return err
+			}
+		}
+		m.hub.Broadcast(id, EventEnvelope{
+			Type: "session.destroyed",
+			Data: mustJSON(map[string]string{"status": string(status)}),
+		})
+	}
+	m.deleteLiveSession(id)
+	return nil
+}
+
+func (m *Manager) Shutdown(ctx context.Context) error {
+	m.mu.RLock()
+	ids := make([]string, 0, len(m.sessions))
+	for id := range m.sessions {
+		ids = append(ids, id)
+	}
+	m.mu.RUnlock()
+
+	var errs []error
+	for _, id := range ids {
+		if err := m.finishSession(ctx, id, true); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 type EventEnvelope struct {
 	Type string          `json:"type"`
 	Data json.RawMessage `json:"data"`
@@ -246,32 +402,68 @@ func (m *Manager) Unsubscribe(sessionID string, ch <-chan EventEnvelope) {
 	m.hub.Unsubscribe(sessionID, ch)
 }
 
-func splitCmd(raw string) (string, []string) {
-	// 复用空格切分；与 harness-agent guard.SplitCommand 等价。
-	var parts []string
-	cur := ""
-	for _, r := range raw {
-		if r == ' ' {
-			if cur != "" {
-				parts = append(parts, cur)
-				cur = ""
-			}
-			continue
-		}
-		cur += string(r)
+func (m *Manager) setStatus(ctx context.Context, live *liveSession, status domain.SessionStatus) error {
+	live.mu.RLock()
+	id := live.session.SessionID
+	live.mu.RUnlock()
+	if err := m.sessionsRepo.UpdateStatus(ctx, id, status); err != nil {
+		return err
 	}
-	if cur != "" {
-		parts = append(parts, cur)
-	}
-	if len(parts) == 0 {
-		return "", nil
-	}
-	return parts[0], parts[1:]
+	live.mu.Lock()
+	live.session.Status = status
+	live.session.UpdatedAt = time.Now().UTC()
+	live.mu.Unlock()
+	return nil
 }
 
-func mustJSON(v any) json.RawMessage {
-	b, _ := json.Marshal(v)
-	return b
+func (m *Manager) liveSession(id string) *liveSession {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.sessions[id]
+}
+
+func (m *Manager) deleteLiveSession(id string) {
+	m.mu.Lock()
+	delete(m.sessions, id)
+	m.mu.Unlock()
+}
+
+func (m *Manager) clearPending(live *liveSession, pending *pendingApproval) {
+	live.mu.Lock()
+	if live.pending == pending {
+		live.pending = nil
+	}
+	live.mu.Unlock()
+}
+
+func mustJSON(value any) json.RawMessage {
+	data, _ := json.Marshal(value)
+	return data
+}
+
+func joinCommand(command string, args []string) string {
+	if len(args) == 0 {
+		return command
+	}
+	for _, arg := range args {
+		command += " " + arg
+	}
+	return command
+}
+
+func containsShellControl(command string) bool {
+	for _, character := range command {
+		switch character {
+		case ';', '&', '|', '>', '<', '`', '$', '(', ')', '\r', '\n':
+			return true
+		}
+	}
+	return false
+}
+
+func cloneSession(session *domain.Session) *domain.Session {
+	cloned := *session
+	return &cloned
 }
 
 func genID() string {

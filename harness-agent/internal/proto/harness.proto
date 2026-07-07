@@ -16,6 +16,7 @@ message CommandContext {
   string command = 4;     // OpenCode 尝试执行的 Bash 原始命令
   repeated string args = 5;
   repeated string env = 6;
+  bool unsafe = 7;        // shell composition/interpreter wrapper detected
 }
 
 // Decision 控制面返回的决策，对齐 policy.Decision。

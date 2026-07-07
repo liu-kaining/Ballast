@@ -19,6 +19,7 @@ export default function ApproveBar({
   busy,
 }: Props) {
   const suspended = status === "SUSPENDED";
+  const canDestroy = status === "RUNNING" || status === "SUSPENDED";
   return (
     <div
       style={{
@@ -83,7 +84,7 @@ export default function ApproveBar({
         >
           {busy ? "处理中..." : "Approve 放行"}
         </button>
-        <button onClick={onDestroy} disabled={busy} style={btn(false, false)}>
+        <button onClick={onDestroy} disabled={busy || !canDestroy} style={btn(!busy && canDestroy, false)}>
           销毁沙箱
         </button>
       </div>

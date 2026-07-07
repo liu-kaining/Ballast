@@ -71,17 +71,17 @@ func (e *Engine) loadDir(dir string) error {
 		}
 		modules[f.Name()] = m
 	}
-	e.modules = modules
-	e.compiler = ast.NewCompiler()
-	if e.compiler.Compile(modules); e.compiler.Errors != nil {
-		return fmt.Errorf("compile rego: %v", e.compiler.Errors)
+	compiler := ast.NewCompiler()
+	if compiler.Compile(modules); compiler.Errors != nil {
+		return fmt.Errorf("compile rego: %v", compiler.Errors)
 	}
+	e.modules = modules
+	e.compiler = compiler
 	return nil
 }
 
 // EvaluateCommand 实现 policy.PolicyEngine。
-// 求值顺序：先看 action（DENY 优先于 SUSPEND 优先于 allow），
-// 再回退 default allow/action。
+// Rego 暴露单一 decision 规则，避免 default action 抢在 allow 之前返回。
 func (e *Engine) EvaluateCommand(ctx context.Context, cmdCtx policy.CommandContext) (policy.Decision, error) {
 	e.mu.RLock()
 	compiler := e.compiler
@@ -95,17 +95,17 @@ func (e *Engine) EvaluateCommand(ctx context.Context, cmdCtx policy.CommandConte
 		"command":    cmdCtx.Command,
 		"args":       cmdCtx.Args,
 		"env":        cmdCtx.Env,
+		"unsafe":     cmdCtx.Unsafe,
 	}
 
-	// 先查 action（DENY / SUSPEND）
-	actionQuery := pkg + ".action"
+	decisionQuery := "data." + pkg + ".decision"
 	res, err := rego.New(
-		rego.Query(actionQuery),
+		rego.Query(decisionQuery),
 		rego.Compiler(compiler),
 		rego.Input(input),
 	).Eval(ctx)
 	if err != nil {
-		return policy.Deny, fmt.Errorf("eval action: %w", err)
+		return policy.Deny, fmt.Errorf("eval decision: %w", err)
 	}
 	if d, ok := extractString(res); ok {
 		switch policy.Decision(d) {
@@ -117,22 +117,7 @@ func (e *Engine) EvaluateCommand(ctx context.Context, cmdCtx policy.CommandConte
 			return policy.Approve, nil
 		}
 	}
-
-	// 再查 allow
-	allowQuery := pkg + ".allow"
-	res, err = rego.New(
-		rego.Query(allowQuery),
-		rego.Compiler(compiler),
-		rego.Input(input),
-	).Eval(ctx, rego.EvalRuleRootsOnly(true))
-	if err != nil {
-		return policy.Deny, fmt.Errorf("eval allow: %w", err)
-	}
-	if allowed, ok := extractBool(res); ok && allowed {
-		return policy.Approve, nil
-	}
-	// 默认按 spec 的 default action=SUSPEND 处理
-	return policy.Suspend, nil
+	return policy.Deny, fmt.Errorf("rego query %s returned no valid decision", decisionQuery)
 }
 
 func extractString(res rego.ResultSet) (string, bool) {
@@ -142,15 +127,6 @@ func extractString(res rego.ResultSet) (string, bool) {
 	v := res[0].Expressions[0].Value
 	s, ok := v.(string)
 	return s, ok
-}
-
-func extractBool(res rego.ResultSet) (bool, bool) {
-	if len(res) == 0 || len(res[0].Expressions) == 0 {
-		return false, false
-	}
-	v := res[0].Expressions[0].Value
-	b, ok := v.(bool)
-	return b, ok
 }
 
 var _ policy.PolicyEngine = (*Engine)(nil)

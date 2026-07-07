@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 
@@ -16,13 +17,12 @@ import (
 // v0.1 采用"输出扫描"模型识别命令（mock-opencode 的事件流里包含 command 字段）；
 // v0.2 接入真实 opencode 后改用 opencode 的 tool.call 事件流精确获取命令。
 type Supervisor struct {
-	cmd     *exec.Cmd
-	tty     *os.File
-	mu      sync.Mutex
-	suspend chan struct{}
-	resume  chan struct{}
-	stopped chan struct{}
-	onLine  func(line string)
+	cmd      *exec.Cmd
+	tty      *os.File
+	mu       sync.Mutex
+	stopped  chan struct{}
+	stopOnce sync.Once
+	onLine   func(line string)
 }
 
 // New 创建 Supervisor。child 为待 spawn 的可执行文件路径，args 为参数。
@@ -32,8 +32,6 @@ func New(child string, args []string, onLine func(line string)) *Supervisor {
 	return &Supervisor{
 		cmd:     c,
 		onLine:  onLine,
-		suspend: make(chan struct{}, 1),
-		resume:  make(chan struct{}, 1),
 		stopped: make(chan struct{}),
 	}
 }
@@ -47,8 +45,9 @@ func (s *Supervisor) Start(ctx context.Context) error {
 	s.tty = tty
 	defer tty.Close()
 
-	// 输出按行扫描
+	scanDone := make(chan struct{})
 	go func() {
+		defer close(scanDone)
 		scanner := bufio.NewScanner(tty)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for scanner.Scan() {
@@ -64,32 +63,18 @@ func (s *Supervisor) Start(ctx context.Context) error {
 	go func() { waitCh <- s.cmd.Wait() }()
 	select {
 	case err := <-waitCh:
-		close(s.stopped)
+		<-scanDone
+		s.markStopped()
 		return err
 	case <-ctx.Done():
 		_ = s.cmd.Process.Kill()
-		close(s.stopped)
+		<-waitCh
+		s.markStopped()
 		return ctx.Err()
 	}
 }
 
-// Suspend 请求挂起（冻结 PTY 读循环）。v0.1 仅信号占位。
-func (s *Supervisor) Suspend() {
-	select {
-	case s.suspend <- struct{}{}:
-	default:
-	}
-}
-
-// Resume 请求放行。
-func (s *Supervisor) Resume() {
-	select {
-	case s.resume <- struct{}{}:
-	default:
-	}
-}
-
-// Write 向 PTY master 写入数据（模拟控制面注入命令）。
+// Write sends a policy decision to the controlled child over its PTY.
 func (s *Supervisor) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -101,3 +86,7 @@ func (s *Supervisor) Write(p []byte) (int, error) {
 
 // Stopped 返回关闭信号 channel。
 func (s *Supervisor) Stopped() <-chan struct{} { return s.stopped }
+
+func (s *Supervisor) markStopped() {
+	s.stopOnce.Do(func() { close(s.stopped) })
+}

@@ -42,7 +42,7 @@ func (s *SkillStore) Upsert(ctx context.Context, sk *domain.Skill) error {
 // Get 按 ID 查询。
 func (s *SkillStore) Get(ctx context.Context, id string) (*domain.Skill, error) {
 	const q = `
-		SELECT skill_id, name, description, trigger_words, markdown_content, version, updated_by, updated_at
+			SELECT skill_id, name, COALESCE(description, ''), trigger_words, markdown_content, version, updated_by, updated_at
 		FROM ballast_skills WHERE skill_id = $1`
 	var sk domain.Skill
 	err := s.pool.QueryRow(ctx, q, id).Scan(
@@ -61,7 +61,7 @@ func (s *SkillStore) Get(ctx context.Context, id string) (*domain.Skill, error) 
 // List 列出所有 Skill。
 func (s *SkillStore) List(ctx context.Context) ([]*domain.Skill, error) {
 	const q = `
-		SELECT skill_id, name, description, trigger_words, markdown_content, version, updated_by, updated_at
+			SELECT skill_id, name, COALESCE(description, ''), trigger_words, markdown_content, version, updated_by, updated_at
 		FROM ballast_skills ORDER BY updated_at DESC`
 	rows, err := s.pool.Query(ctx, q)
 	if err != nil {

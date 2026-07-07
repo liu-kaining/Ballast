@@ -9,6 +9,7 @@ import {
   destroySession,
   getSession,
   sessionWSURL,
+  errorMessage,
   type EventEnvelope,
   type Session,
 } from "@/lib/api";
@@ -43,8 +44,8 @@ export default function SessionWorkspacePage({
     try {
       const s = await getSession(id);
       setSession(s);
-    } catch (e: any) {
-      setError(e.message || String(e));
+    } catch (e: unknown) {
+      setError(errorMessage(e));
     }
   }, [id]);
 
@@ -62,11 +63,28 @@ export default function SessionWorkspacePage({
         const env: EventEnvelope = JSON.parse(msg.data);
         setEvents((prev) => [...prev, env]);
         if (env.type === "policy.decision" && env.data) {
-          setPendingCommand(env.data.command);
-          setPendingDecision(env.data.decision);
+          setPendingCommand(
+            typeof env.data.command === "string" ? env.data.command : undefined
+          );
+          setPendingDecision(
+            typeof env.data.decision === "string" ? env.data.decision : undefined
+          );
         }
         if (env.type === "policy.resumed") {
           setPendingDecision(undefined);
+          setPendingCommand(undefined);
+        }
+        if (env.type === "session.completed" || env.type === "session.destroyed") {
+          setPendingDecision(undefined);
+          setPendingCommand(undefined);
+        }
+        if (
+          env.type === "policy.decision" ||
+          env.type === "policy.resumed" ||
+          env.type === "session.completed" ||
+          env.type === "session.destroyed"
+        ) {
+          void refreshSession();
         }
       } catch {
         /* ignore malformed */
@@ -74,14 +92,14 @@ export default function SessionWorkspacePage({
     };
     ws.onerror = () => setError("WebSocket 连接异常");
     return () => ws.close();
-  }, [id]);
+  }, [id, refreshSession]);
 
   // 状态变化时刷新会话元信息
   useEffect(() => {
     refreshSession();
     const t = setInterval(refreshSession, 3000);
     return () => clearInterval(t);
-  }, [events, refreshSession]);
+  }, [refreshSession]);
 
   const terminalLines = useMemo(() => toTerminalLines(events), [events]);
 
@@ -90,8 +108,8 @@ export default function SessionWorkspacePage({
     setBusy(true);
     try {
       await approveSession(id);
-    } catch (e: any) {
-      setError(e.message || String(e));
+    } catch (e: unknown) {
+      setError(errorMessage(e));
     } finally {
       setBusy(false);
     }
@@ -103,8 +121,8 @@ export default function SessionWorkspacePage({
     try {
       await destroySession(id);
       await refreshSession();
-    } catch (e: any) {
-      setError(e.message || String(e));
+    } catch (e: unknown) {
+      setError(errorMessage(e));
     } finally {
       setBusy(false);
     }
@@ -208,13 +226,19 @@ function toTerminalLines(events: EventEnvelope[]): string[] {
       case "reason.step": {
         const p = ev.data || {};
         lines.push(`\x1b[35m#${p.index} ${p.title}\x1b[0m`);
-        if (p.thought) lines.push(`  ${p.thought}`);
+        if (typeof p.thought === "string") lines.push(`  ${p.thought}`);
         break;
       }
       case "tool.call": {
         const p = ev.data || {};
         lines.push(`\x1b[33m$\x1b[0m ${p.command}`);
-        if (p.stdout) lines.push(p.stdout);
+        if (typeof p.stdout === "string") lines.push(p.stdout);
+        break;
+      }
+      case "tool.result": {
+        const p = ev.data || {};
+        if (typeof p.stdout === "string") lines.push(p.stdout);
+        if (p.stderr) lines.push(`\x1b[31m${p.stderr}\x1b[0m`);
         break;
       }
       case "policy.decision": {
@@ -233,7 +257,7 @@ function toTerminalLines(events: EventEnvelope[]): string[] {
         break;
       case "message.completed": {
         const p = ev.data || {};
-        if (p.text) lines.push(`\x1b[36m[assistant] ${p.text}\x1b[0m`);
+        if (typeof p.text === "string") lines.push(`\x1b[36m[assistant] ${p.text}\x1b[0m`);
         break;
       }
       default:

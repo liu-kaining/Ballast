@@ -1,57 +1,73 @@
 package orchestrator
 
-import (
-	"sync"
-)
+import "sync"
 
-// Hub 按 sessionID 维护 WebSocket 订阅者，广播 EventEnvelope。
+const eventHistoryLimit = 256
+
+// Hub retains a bounded per-session history and broadcasts live events.
+// Replaying history prevents users from missing early sandbox events while
+// navigating from the session list to the workspace.
 type Hub struct {
-	mu     sync.RWMutex
-	chans  map[string]map[chan EventEnvelope]struct{}
+	mu      sync.Mutex
+	chans   map[string]map[chan EventEnvelope]struct{}
+	history map[string][]EventEnvelope
 }
 
 func NewHub() *Hub {
-	return &Hub{chans: map[string]map[chan EventEnvelope]struct{}{}}
+	return &Hub{
+		chans:   make(map[string]map[chan EventEnvelope]struct{}),
+		history: make(map[string][]EventEnvelope),
+	}
 }
 
-// Subscribe 订阅一个 session 的事件流，返回只读 channel。
 func (h *Hub) Subscribe(sessionID string) <-chan EventEnvelope {
-	ch := make(chan EventEnvelope, 64)
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	ch := make(chan EventEnvelope, eventHistoryLimit+64)
 	if h.chans[sessionID] == nil {
-		h.chans[sessionID] = map[chan EventEnvelope]struct{}{}
+		h.chans[sessionID] = make(map[chan EventEnvelope]struct{})
 	}
 	h.chans[sessionID][ch] = struct{}{}
+	for _, event := range h.history[sessionID] {
+		ch <- event
+	}
 	return ch
 }
 
-// Unsubscribe 取消订阅。
 func (h *Hub) Unsubscribe(sessionID string, ch <-chan EventEnvelope) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	subs, ok := h.chans[sessionID]
-	if !ok {
-		return
-	}
-	for c := range subs {
-		if c == ch {
-			close(c)
-			delete(subs, c)
+
+	for subscriber := range h.chans[sessionID] {
+		if subscriber == ch {
+			delete(h.chans[sessionID], subscriber)
+			close(subscriber)
+			break
 		}
+	}
+	if len(h.chans[sessionID]) == 0 {
+		delete(h.chans, sessionID)
 	}
 }
 
-// Broadcast 向某 session 的所有订阅者广播事件。非阻塞：慢消费者丢弃。
-func (h *Hub) Broadcast(sessionID string, ev EventEnvelope) {
-	h.mu.RLock()
-	subs := h.chans[sessionID]
-	h.mu.RUnlock()
-	for c := range subs {
+// Broadcast is non-blocking for live subscribers. History remains available
+// even when a browser has not connected yet.
+func (h *Hub) Broadcast(sessionID string, event EventEnvelope) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	history := append(h.history[sessionID], event)
+	if len(history) > eventHistoryLimit {
+		history = append([]EventEnvelope(nil), history[len(history)-eventHistoryLimit:]...)
+	}
+	h.history[sessionID] = history
+
+	for subscriber := range h.chans[sessionID] {
 		select {
-		case c <- ev:
+		case subscriber <- event:
 		default:
-			// drop on full
+			// A slow browser can reconnect and recover from retained history.
 		}
 	}
 }

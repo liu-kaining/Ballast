@@ -35,8 +35,9 @@ func (s *AuditStore) Append(ctx context.Context, log *domain.AuditLog) (int64, e
 // ListBySession 按 session 拉取审计日志。
 func (s *AuditStore) ListBySession(ctx context.Context, sessionID string, limit int) ([]*domain.AuditLog, error) {
 	const q = `
-		SELECT audit_id, session_id, loop_index, model_name, prompt_tokens, completion_tokens,
-		       executed_command, policy_decision, approver, raw_tty_output_path, created_at
+			SELECT audit_id, session_id, loop_index, COALESCE(model_name, ''), prompt_tokens, completion_tokens,
+			       COALESCE(executed_command, ''), COALESCE(policy_decision, ''),
+			       COALESCE(approver, ''), COALESCE(raw_tty_output_path, ''), created_at
 		FROM ballast_audit_logs
 		WHERE session_id = $1
 		ORDER BY audit_id ASC

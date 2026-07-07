@@ -57,8 +57,8 @@ type ToolCallPayload struct {
 
 // ReasonStepPayload 从 Event.Payload 解析 reason.step 事件。
 type ReasonStepPayload struct {
-	Index  int    `json:"index"`
-	Title  string `json:"title"`
+	Index   int    `json:"index"`
+	Title   string `json:"title"`
 	Thought string `json:"thought"`
 }
 

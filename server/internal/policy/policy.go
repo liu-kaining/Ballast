@@ -21,6 +21,7 @@ type CommandContext struct {
 	Command   string   `json:"command"` // Bash 原始命令
 	Args      []string `json:"args"`
 	Env       []string `json:"env"`
+	Unsafe    bool     `json:"unsafe"`
 }
 
 // PolicyEngine 输入尝试执行的命令上下文，输出决策。

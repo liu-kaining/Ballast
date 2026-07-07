@@ -1,51 +1,63 @@
 package ballast.security
 
-# Ballast K8s 生产写操作拦截策略（spec/INIT.md 第 466-517 行原样）
-#
-# 默认状态：所有行为拒绝，除非命中放行白名单
-default allow = false
-default action = "SUSPEND" # 触发安全策略时的默认首选行为：挂起进程进入人工审批断点
+# 未知命令和所有生产写操作默认进入人工审批断点。
+default decision = "SUSPEND"
 
-# 规则一：绝对允许放行名单 (只读和安全的 Git 操作)
-allow {
-	is_safe_command(input.command)
+# 复合 shell、解释器包装和提权命令可能隐藏第二条指令，绝不允许审批绕过。
+decision = "DENY" {
+	input.unsafe
 }
 
-# 规则二：绝对阻断黑名单 (任何环境下 AI 引擎绝对不能碰的红线命令)
-action = "DENY" {
-	blacklist_commands[_] == input.command
+decision = "DENY" {
+	denied_wrappers[input.command]
 }
 
-# 规则三：触发人工审批断点的灰名单 (允许 AI 在沙箱内 Plan，但执行必须截获并悬挂)
-action = "SUSPEND" {
-	not is_safe_command(input.command)
-	graylist_commands[_] == input.command
+# 明确的只读操作自动放行。command 是可执行文件，args 是参数数组，
+# 避免把 "kubectl get" 与 "kubectl" 两种粒度混在一起。
+decision = "APPROVE" {
+	not input.unsafe
+	input.command == "kubectl"
+	safe_kubectl_verbs[input.args[0]]
 }
 
-# --- 策略底座元数据声明 ---
-
-is_safe_command(cmd) {
-	safe_commands[_] == cmd
+decision = "APPROVE" {
+	not input.unsafe
+	input.command == "git"
+	safe_git_verbs[input.args[0]]
 }
 
-# 只读命令白名单 (Auto-Run)
-safe_commands = [
-	"kubectl get", "kubectl logs", "kubectl describe", "kubectl top",
-	"git status", "git diff", "git log",
-	"terraform plan", "terraform validate",
-	"ls", "cat", "grep", "awk"
-]
+decision = "APPROVE" {
+	not input.unsafe
+	input.command == "terraform"
+	safe_terraform_verbs[input.args[0]]
+}
 
-# 危险命令黑名单 (Blocked)
-blacklist_commands = [
-	"rm -rf /", "mkfs", "fdisk", "dd",
-	"kubectl delete namespace", "kubectl delete clusterrolebinding",
-	"shutdown", "reboot"
-]
+decision = "APPROVE" {
+	not input.unsafe
+	safe_standalone_commands[input.command]
+}
 
-# 高危变更灰名单 (Human-in-the-loop Intercept)
-graylist_commands = [
-	"kubectl apply", "kubectl delete", "kubectl patch", "kubectl edit",
-	"terraform apply", "terraform destroy",
-	"git push", "helm upgrade", "helm uninstall"
-]
+# 任何环境下都不可放行的破坏性命令。
+decision = "DENY" {
+	denied_commands[input.command]
+}
+
+decision = "DENY" {
+	input.command == "rm"
+	input.args[_] == "/"
+}
+
+decision = "DENY" {
+	input.command == "kubectl"
+	input.args[0] == "delete"
+	denied_kubectl_resources[input.args[_]]
+}
+
+safe_kubectl_verbs = {"get", "logs", "describe", "top"}
+safe_git_verbs = {"status", "diff", "log"}
+safe_terraform_verbs = {"plan", "validate"}
+safe_standalone_commands = {"ls", "cat", "grep", "awk"}
+
+denied_commands = {"mkfs", "fdisk", "dd", "shutdown", "reboot"}
+denied_kubectl_resources = {"namespace", "clusterrolebinding"}
+denied_wrappers = {"sh", "bash", "zsh", "sudo", "env", "eval"}

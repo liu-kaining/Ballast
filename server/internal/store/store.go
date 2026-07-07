@@ -11,7 +11,7 @@ import (
 
 // Store 聚合所有表的访问器。
 type Store struct {
-	pool    *pgxpool.Pool
+	pool     *pgxpool.Pool
 	Sessions *SessionStore
 	Audit    *AuditStore
 	Skills   *SkillStore
@@ -43,3 +43,11 @@ func (s *Store) Close() {
 
 // Pool 暴露底层连接池，供需要原生查询的调用方使用。
 func (s *Store) Pool() *pgxpool.Pool { return s.pool }
+
+// Ping verifies that PostgreSQL is reachable.
+func (s *Store) Ping(ctx context.Context) error {
+	if s.pool == nil {
+		return fmt.Errorf("store is closed")
+	}
+	return s.pool.Ping(ctx)
+}
