@@ -14,7 +14,7 @@ runtime_provider:
     max_cpu_cores: 2
     max_memory_mb: 2048
     default_image: "ballast-runner-base:dev"
-    workspace_root: "/tmp/ballast/sandboxes"
+    workspace_root: "${BALLAST_WORKSPACE_ROOT:-/tmp/ballast/sandboxes}"
     control_plane_url: "${BALLAST_CONTROL_PLANE_URL:-http://host.docker.internal:8080}"
 
 credential_center:

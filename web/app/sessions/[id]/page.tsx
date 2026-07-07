@@ -8,8 +8,10 @@ import {
   approveSession,
   destroySession,
   getSession,
+  listAuditLogs,
   sessionWSURL,
   errorMessage,
+  type AuditLog,
   type EventEnvelope,
   type Session,
 } from "@/lib/api";
@@ -29,6 +31,7 @@ export default function SessionWorkspacePage({
   const [events, setEvents] = useState<EventEnvelope[]>([]);
   const [pendingCommand, setPendingCommand] = useState<string | undefined>();
   const [pendingDecision, setPendingDecision] = useState<string | undefined>();
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -52,6 +55,20 @@ export default function SessionWorkspacePage({
   useEffect(() => {
     refreshSession();
   }, [refreshSession]);
+
+  const refreshAudit = useCallback(async () => {
+    if (!id) return;
+    try {
+      const logs = await listAuditLogs(id);
+      setAuditLogs(logs);
+    } catch (e: unknown) {
+      setError(errorMessage(e));
+    }
+  }, [id]);
+
+  useEffect(() => {
+    refreshAudit();
+  }, [refreshAudit]);
 
   // 订阅 WebSocket 事件流
   useEffect(() => {
@@ -85,6 +102,7 @@ export default function SessionWorkspacePage({
           env.type === "session.destroyed"
         ) {
           void refreshSession();
+          void refreshAudit();
         }
       } catch {
         /* ignore malformed */
@@ -92,7 +110,7 @@ export default function SessionWorkspacePage({
     };
     ws.onerror = () => setError("WebSocket 连接异常");
     return () => ws.close();
-  }, [id, refreshSession]);
+  }, [id, refreshSession, refreshAudit]);
 
   // 状态变化时刷新会话元信息
   useEffect(() => {
@@ -108,6 +126,7 @@ export default function SessionWorkspacePage({
     setBusy(true);
     try {
       await approveSession(id);
+      await refreshAudit();
     } catch (e: unknown) {
       setError(errorMessage(e));
     } finally {
@@ -121,6 +140,7 @@ export default function SessionWorkspacePage({
     try {
       await destroySession(id);
       await refreshSession();
+      await refreshAudit();
     } catch (e: unknown) {
       setError(errorMessage(e));
     } finally {
@@ -181,6 +201,7 @@ export default function SessionWorkspacePage({
             onDestroy={handleDestroy}
             busy={busy}
           />
+          <AuditTrail logs={auditLogs} />
         </Pane>
       </section>
     </main>
@@ -214,6 +235,56 @@ function Pane({ title, children }: { title: string; children: React.ReactNode })
       <div style={{ flex: 1, minHeight: 0 }}>{children}</div>
     </div>
   );
+}
+
+function AuditTrail({ logs }: { logs: AuditLog[] }) {
+  return (
+    <div
+      style={{
+        borderTop: "1px solid var(--border)",
+        padding: 12,
+        display: "grid",
+        gap: 8,
+        maxHeight: 260,
+        overflow: "auto",
+      }}
+    >
+      <div style={{ color: "var(--muted)", fontSize: 12, textTransform: "uppercase" }}>
+        Audit Trail
+      </div>
+      {logs.length === 0 ? (
+        <div style={{ color: "var(--muted)", fontSize: 13 }}>暂无审计记录</div>
+      ) : (
+        logs.map((log) => (
+          <div
+            key={log.audit_id}
+            style={{
+              background: "var(--panel-2)",
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+              padding: 8,
+              fontSize: 12,
+            }}
+          >
+            <code style={{ color: decisionColor(log.policy_decision) }}>
+              {log.policy_decision || "EVENT"}
+            </code>
+            <div style={{ marginTop: 4 }}>{log.executed_command || "(no command)"}</div>
+            {log.approver && (
+              <div style={{ color: "var(--muted)", marginTop: 4 }}>approver={log.approver}</div>
+            )}
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+function decisionColor(decision: string): string {
+  if (decision === "DENY") return "var(--danger)";
+  if (decision === "SUSPEND") return "var(--warn)";
+  if (decision === "APPROVE") return "var(--ok)";
+  return "var(--muted)";
 }
 
 function toTerminalLines(events: EventEnvelope[]): string[] {

@@ -13,6 +13,37 @@ export interface Session {
   updated_at: string;
 }
 
+export interface Skill {
+  skill_id: string;
+  name: string;
+  description: string;
+  trigger_words: string[];
+  markdown_content: string;
+  version: number;
+  updated_by: string;
+  updated_at?: string;
+}
+
+export interface TriggerRule {
+  rule_id: string;
+  name: string;
+  is_active: boolean;
+  trigger_source: string;
+  match_expression: Record<string, unknown>;
+  bind_skills: string[];
+  agent_image: string;
+  policy_group: string;
+}
+
+export interface AuditLog {
+  audit_id: number;
+  session_id: string;
+  executed_command: string;
+  policy_decision: string;
+  approver: string;
+  created_at: string;
+}
+
 export interface EventEnvelope {
   type: string;
   data: Record<string, string | number | boolean | null | undefined>;
@@ -64,13 +95,14 @@ export async function listSessions(
 
 export async function createSession(
   title: string,
-  agentImage = "ballast-runner-base:dev"
+  agentImage = "ballast-runner-base:dev",
+  skillIDs: string[] = []
 ): Promise<Session> {
   const res = await fetch(`${API_BASE}/api/sessions`, {
     ...requestDefaults,
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title, agent_image: agentImage }),
+    body: JSON.stringify({ title, agent_image: agentImage, skill_ids: skillIDs }),
   });
   if (!res.ok) throw new APIError("createSession", res.status);
   return res.json();
@@ -108,6 +140,58 @@ export async function destroySession(id: string) {
 export function sessionWSURL(id: string): string {
   const base = API_BASE.replace(/^http/, "ws");
   return `${base}/api/sessions/${id}/ws`;
+}
+
+export async function listSkills(): Promise<Skill[]> {
+  const res = await fetch(`${API_BASE}/api/skills`, {
+    ...requestDefaults,
+    cache: "no-store",
+  });
+  if (!res.ok) throw new APIError("listSkills", res.status);
+  const body = await res.json();
+  return body.skills ?? [];
+}
+
+export async function upsertSkill(skill: Skill): Promise<Skill> {
+  const res = await fetch(`${API_BASE}/api/skills`, {
+    ...requestDefaults,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(skill),
+  });
+  if (!res.ok) throw new APIError("upsertSkill", res.status);
+  return res.json();
+}
+
+export async function listTriggerRules(): Promise<TriggerRule[]> {
+  const res = await fetch(`${API_BASE}/api/trigger-rules`, {
+    ...requestDefaults,
+    cache: "no-store",
+  });
+  if (!res.ok) throw new APIError("listTriggerRules", res.status);
+  const body = await res.json();
+  return body.trigger_rules ?? [];
+}
+
+export async function upsertTriggerRule(rule: TriggerRule): Promise<TriggerRule> {
+  const res = await fetch(`${API_BASE}/api/trigger-rules`, {
+    ...requestDefaults,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(rule),
+  });
+  if (!res.ok) throw new APIError("upsertTriggerRule", res.status);
+  return res.json();
+}
+
+export async function listAuditLogs(id: string, limit = 100): Promise<AuditLog[]> {
+  const res = await fetch(`${API_BASE}/api/sessions/${id}/audit?limit=${limit}`, {
+    ...requestDefaults,
+    cache: "no-store",
+  });
+  if (!res.ok) throw new APIError("listAuditLogs", res.status);
+  const body = await res.json();
+  return body.audit_logs ?? [];
 }
 
 export function errorMessage(error: unknown): string {

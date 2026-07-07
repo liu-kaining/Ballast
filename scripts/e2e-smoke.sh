@@ -21,6 +21,10 @@ json_field() {
   python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"
 }
 
+json_len() {
+  python3 -c 'import json,sys; print(len(json.load(sys.stdin)[sys.argv[1]]))' "$1"
+}
+
 wait_for_status() {
   local session_id="$1"
   local wanted="$2"
@@ -60,9 +64,25 @@ curl -fsS -c "${cookie_jar}" \
   -d "{\"token\":\"${admin_token}\"}" \
   "${api_base}/api/auth/login" >/dev/null
 
+curl -fsS -b "${cookie_jar}" \
+  -H 'Content-Type: application/json' \
+  -d '{"skill_id":"k8s-debug","name":"K8s CrashLoop Debug","description":"e2e skill","trigger_words":["k8s","pod"],"markdown_content":"---\nname: k8s-debug\n---\n# K8s Debug\n","version":1,"updated_by":"e2e"}' \
+  "${api_base}/api/skills" >/dev/null
+
+skill_count="$(curl -fsS -b "${cookie_jar}" "${api_base}/api/skills" | json_len skills)"
+(( skill_count >= 1 ))
+
+curl -fsS -b "${cookie_jar}" \
+  -H 'Content-Type: application/json' \
+  -d '{"rule_id":"k8s-crashloop","name":"K8s CrashLoopBackOff triage","is_active":true,"trigger_source":"prometheus_alertmanager","match_expression":{"alertname":"K8sPodCrashLooping","severity":"critical"},"bind_skills":["k8s-debug"],"agent_image":"ballast-runner-base:dev","policy_group":"k8s_prod_write_intercept"}' \
+  "${api_base}/api/trigger-rules" >/dev/null
+
+rule_count="$(curl -fsS -b "${cookie_jar}" "${api_base}/api/trigger-rules" | json_len trigger_rules)"
+(( rule_count >= 1 ))
+
 session_json="$(curl -fsS -b "${cookie_jar}" \
   -H 'Content-Type: application/json' \
-  -d '{"title":"e2e CrashLoopBackOff triage"}' \
+  -d '{"title":"e2e CrashLoopBackOff triage","skill_ids":["k8s-debug"]}' \
   "${api_base}/api/sessions")"
 session_id="$(printf '%s' "${session_json}" | json_field session_id)"
 
@@ -72,6 +92,9 @@ sandbox_security="$(docker inspect -f \
   '{{.Config.User}}|{{.HostConfig.ReadonlyRootfs}}|{{json .HostConfig.CapDrop}}|{{json .HostConfig.SecurityOpt}}' \
   "ballast-sbx-${session_id}")"
 [[ "${sandbox_security}" == 'ballast|true|["ALL"]|["no-new-privileges"]' ]]
+
+docker exec "ballast-sbx-${session_id}" \
+  test -f /workspace/.opencode/skills/k8s-debug/SKILL.md
 
 audit_before="$(docker compose exec -T postgres psql -U ballast -d ballast -Atc \
   "SELECT policy_decision || ':' || count(*) FROM ballast_audit_logs WHERE session_id='${session_id}' GROUP BY policy_decision ORDER BY policy_decision")"
@@ -95,6 +118,9 @@ audit_after="$(docker compose exec -T postgres psql -U ballast -d ballast -Atc \
   "SELECT policy_decision || ':' || count(*) FROM ballast_audit_logs WHERE session_id='${session_id}' GROUP BY policy_decision ORDER BY policy_decision")"
 grep -qx 'APPROVE:3' <<<"${audit_after}"
 grep -qx 'SUSPEND:1' <<<"${audit_after}"
+
+audit_api_count="$(curl -fsS -b "${cookie_jar}" "${api_base}/api/sessions/${session_id}/audit" | json_len audit_logs)"
+[[ "${audit_api_count}" == "4" ]]
 
 code="$(status_code -b "${cookie_jar}" -X POST \
   "${api_base}/api/sessions/${session_id}/approve")"

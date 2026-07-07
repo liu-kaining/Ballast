@@ -5,12 +5,18 @@ import Link from "next/link";
 import {
   listSessions,
   createSession,
+  listSkills,
+  listTriggerRules,
+  upsertSkill,
+  upsertTriggerRule,
   login,
   logout,
   APIError,
   errorMessage,
   type Session,
   type SessionStatus,
+  type Skill,
+  type TriggerRule,
 } from "@/lib/api";
 
 const STATUS_COLORS: Record<SessionStatus, string> = {
@@ -28,13 +34,25 @@ export default function SessionsPage() {
   const [title, setTitle] = useState("K8s CrashLoopBackOff 排障");
   const [authRequired, setAuthRequired] = useState(false);
   const [token, setToken] = useState("");
+  const [skills, setSkills] = useState<Skill[]>([]);
+  const [triggerRules, setTriggerRules] = useState<TriggerRule[]>([]);
+  const [selectedSkillIDs, setSelectedSkillIDs] = useState<string[]>([]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const list = await listSessions();
+      const [list, skillList, ruleList] = await Promise.all([
+        listSessions(),
+        listSkills(),
+        listTriggerRules(),
+      ]);
       setSessions(list);
+      setSkills(skillList);
+      setTriggerRules(ruleList);
+      setSelectedSkillIDs((current) =>
+        current.filter((id) => skillList.some((skill) => skill.skill_id === id))
+      );
     } catch (e: unknown) {
       if (e instanceof APIError && e.status === 401) {
         setAuthRequired(true);
@@ -53,7 +71,7 @@ export default function SessionsPage() {
     setCreating(true);
     setError(null);
     try {
-      await createSession(title);
+      await createSession(title, "ballast-runner-base:dev", selectedSkillIDs);
       await refresh();
     } catch (e: unknown) {
       setError(errorMessage(e));
@@ -81,6 +99,56 @@ export default function SessionsPage() {
     await logout();
     setSessions([]);
     setAuthRequired(true);
+  }
+
+  async function handleSeedSkill() {
+    setCreating(true);
+    setError(null);
+    try {
+      await upsertSkill({
+        skill_id: "k8s-debug",
+        name: "K8s CrashLoop Debug",
+        description: "用于 CrashLoopBackOff 初筛的本地 Markdown Skill 示例。",
+        trigger_words: ["k8s", "pod", "crashloop"],
+        markdown_content:
+          "---\nname: k8s-debug\nsummary: Diagnose Kubernetes CrashLoopBackOff safely\n---\n# K8s CrashLoop Debug\n\n先执行只读 kubectl get/describe/logs，任何 apply/delete 操作必须等待 Ballast 审批。\n",
+        version: 1,
+        updated_by: "operator",
+      });
+      await refresh();
+    } catch (e: unknown) {
+      setError(errorMessage(e));
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function handleSeedRule() {
+    setCreating(true);
+    setError(null);
+    try {
+      await upsertTriggerRule({
+        rule_id: "k8s-crashloop",
+        name: "K8s CrashLoopBackOff triage",
+        is_active: true,
+        trigger_source: "prometheus_alertmanager",
+        match_expression: { alertname: "K8sPodCrashLooping", severity: "critical" },
+        bind_skills: ["k8s-debug"],
+        agent_image: "ballast-runner-base:dev",
+        policy_group: "k8s_prod_write_intercept",
+      });
+      await refresh();
+    } catch (e: unknown) {
+      setError(errorMessage(e));
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  function toggleSkill(id: string) {
+    setSelectedSkillIDs((current) =>
+      current.includes(id) ? current.filter((item) => item !== id) : [...current, id]
+    );
   }
 
   return (
@@ -168,6 +236,68 @@ export default function SessionsPage() {
           {creating ? "拉起中..." : "拉起沙箱会话"}
         </button>
       </section>
+      )}
+
+      {!authRequired && (
+        <section
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            gap: 16,
+            marginBottom: 24,
+          }}
+        >
+          <AssetPanel
+            title="Skill 资产"
+            actionLabel="写入示例 Skill"
+            onAction={handleSeedSkill}
+            busy={creating}
+          >
+            {skills.length === 0 ? (
+              <p style={mutedStyle()}>暂无 Skill。可写入示例后随会话只读挂载到沙箱。</p>
+            ) : (
+              skills.map((skill) => (
+                <label key={skill.skill_id} style={assetRowStyle()}>
+                  <input
+                    type="checkbox"
+                    checked={selectedSkillIDs.includes(skill.skill_id)}
+                    onChange={() => toggleSkill(skill.skill_id)}
+                  />
+                  <span>
+                    <strong>{skill.name}</strong>
+                    <code style={{ display: "block", color: "var(--muted)" }}>
+                      {skill.skill_id} · v{skill.version}
+                    </code>
+                  </span>
+                </label>
+              ))
+            )}
+          </AssetPanel>
+          <AssetPanel
+            title="触发路由"
+            actionLabel="写入示例路由"
+            onAction={handleSeedRule}
+            busy={creating}
+          >
+            {triggerRules.length === 0 ? (
+              <p style={mutedStyle()}>暂无自动化路由。v0.1 提供资产管理，Webhook/Cron 执行在 v0.2。</p>
+            ) : (
+              triggerRules.map((rule) => (
+                <div key={rule.rule_id} style={assetRowStyle()}>
+                  <span style={{ color: rule.is_active ? "var(--ok)" : "var(--muted)" }}>
+                    ●
+                  </span>
+                  <span>
+                    <strong>{rule.name}</strong>
+                    <code style={{ display: "block", color: "var(--muted)" }}>
+                      {rule.trigger_source} → {rule.agent_image}
+                    </code>
+                  </span>
+                </div>
+              ))
+            )}
+          </AssetPanel>
+        </section>
       )}
 
       {error && (
@@ -259,4 +389,54 @@ function btnStyle(primary = false): React.CSSProperties {
     cursor: "pointer",
     fontWeight: 600,
   };
+}
+
+function AssetPanel({
+  title,
+  actionLabel,
+  onAction,
+  busy,
+  children,
+}: {
+  title: string;
+  actionLabel: string;
+  onAction: () => void;
+  busy: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      style={{
+        background: "var(--panel)",
+        border: "1px solid var(--border)",
+        borderRadius: 8,
+        padding: 16,
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+        <h2 style={{ margin: 0, fontSize: 16 }}>{title}</h2>
+        <button onClick={onAction} disabled={busy} style={btnStyle()}>
+          {actionLabel}
+        </button>
+      </div>
+      <div style={{ display: "grid", gap: 10, marginTop: 14 }}>{children}</div>
+    </div>
+  );
+}
+
+function assetRowStyle(): React.CSSProperties {
+  return {
+    display: "flex",
+    gap: 10,
+    alignItems: "flex-start",
+    background: "var(--panel-2)",
+    border: "1px solid var(--border)",
+    borderRadius: 6,
+    padding: 10,
+    fontSize: 13,
+  };
+}
+
+function mutedStyle(): React.CSSProperties {
+  return { color: "var(--muted)", margin: 0, fontSize: 13, lineHeight: 1.5 };
 }

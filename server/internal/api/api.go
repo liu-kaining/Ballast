@@ -14,6 +14,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -37,6 +38,20 @@ type Options struct {
 	InternalToken      string
 	CORSAllowedOrigins []string
 	CookieSecure       bool
+	Skills             SkillRepository
+	TriggerRules       TriggerRuleRepository
+}
+
+type SkillRepository interface {
+	Upsert(context.Context, *domain.Skill) error
+	Get(context.Context, string) (*domain.Skill, error)
+	List(context.Context) ([]*domain.Skill, error)
+}
+
+type TriggerRuleRepository interface {
+	Upsert(context.Context, *domain.TriggerRule) error
+	Get(context.Context, string) (*domain.TriggerRule, error)
+	List(context.Context) ([]*domain.TriggerRule, error)
 }
 
 type Router struct {
@@ -65,6 +80,10 @@ func NewRouter(mux *http.ServeMux, manager *orchestrator.Manager, logger *log.Lo
 	mux.HandleFunc("/api/auth/logout", r.withCORS(r.handleLogout))
 	mux.HandleFunc("/api/sessions", r.withCORS(r.requireSession(r.handleSessions)))
 	mux.HandleFunc("/api/sessions/", r.withCORS(r.requireSession(r.handleSessionItem)))
+	mux.HandleFunc("/api/skills", r.withCORS(r.requireSession(r.handleSkills)))
+	mux.HandleFunc("/api/skills/", r.withCORS(r.requireSession(r.handleSkillItem)))
+	mux.HandleFunc("/api/trigger-rules", r.withCORS(r.requireSession(r.handleTriggerRules)))
+	mux.HandleFunc("/api/trigger-rules/", r.withCORS(r.requireSession(r.handleTriggerRuleItem)))
 	mux.HandleFunc("/api/internal/harness/report", r.requireInternal(r.handleHarnessReport))
 	mux.HandleFunc("/api/internal/harness/event", r.requireInternal(r.handleHarnessEvent))
 	return r
@@ -173,8 +192,9 @@ func (r *Router) listSessions(w http.ResponseWriter, req *http.Request) {
 
 func (r *Router) createSession(w http.ResponseWriter, req *http.Request) {
 	var body struct {
-		Title      string `json:"title"`
-		AgentImage string `json:"agent_image"`
+		Title      string   `json:"title"`
+		AgentImage string   `json:"agent_image"`
+		SkillIDs   []string `json:"skill_ids"`
 	}
 	if err := decodeJSON(w, req, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -188,7 +208,7 @@ func (r *Router) createSession(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, http.StatusBadRequest, errors.New("title exceeds 255 characters"))
 		return
 	}
-	session, err := r.manager.CreateSession(req.Context(), body.Title, body.AgentImage)
+	session, err := r.manager.CreateSession(req.Context(), body.Title, body.AgentImage, body.SkillIDs...)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
@@ -214,6 +234,8 @@ func (r *Router) handleSessionItem(w http.ResponseWriter, req *http.Request) {
 		r.approveSession(w, req, id)
 	case rest == "resume" && req.Method == http.MethodPost:
 		r.approveSession(w, req, id)
+	case rest == "audit" && req.Method == http.MethodGet:
+		r.listAudit(w, req, id)
 	case rest == "destroy" && req.Method == http.MethodPost:
 		r.destroySession(w, req, id)
 	case rest == "ws" && req.Method == http.MethodGet:
@@ -237,11 +259,53 @@ func (r *Router) getSession(w http.ResponseWriter, req *http.Request, id string)
 }
 
 func (r *Router) approveSession(w http.ResponseWriter, req *http.Request, id string) {
-	if err := r.manager.Approve(req.Context(), id, "operator"); err != nil {
+	approver := "operator"
+	if req.ContentLength != 0 {
+		var body struct {
+			Approver string `json:"approver"`
+		}
+		if err := decodeJSON(w, req, &body); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if body.Approver = strings.TrimSpace(body.Approver); body.Approver != "" {
+			approver = body.Approver
+		}
+	}
+	if len([]rune(approver)) > 64 {
+		writeErr(w, http.StatusBadRequest, errors.New("approver exceeds 64 characters"))
+		return
+	}
+	if err := r.manager.Approve(req.Context(), id, approver); err != nil {
 		writeErr(w, http.StatusConflict, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "resumed"})
+}
+
+func (r *Router) listAudit(w http.ResponseWriter, req *http.Request, id string) {
+	if _, err := r.manager.GetSession(req.Context(), id); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, err)
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	limit, err := parseNonNegativeInt(req.URL.Query().Get("limit"), 100)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid limit"))
+		return
+	}
+	logs, err := r.manager.ListAudit(req.Context(), id, limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if logs == nil {
+		logs = []*domain.AuditLog{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"audit_logs": logs})
 }
 
 func (r *Router) destroySession(w http.ResponseWriter, req *http.Request, id string) {
@@ -348,6 +412,156 @@ func (r *Router) handleHarnessEvent(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
+}
+
+func (r *Router) handleSkills(w http.ResponseWriter, req *http.Request) {
+	if req.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.options.Skills == nil {
+		writeErr(w, http.StatusNotImplemented, errors.New("skill repository is not configured"))
+		return
+	}
+	switch req.Method {
+	case http.MethodGet:
+		skills, err := r.options.Skills.List(req.Context())
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		if skills == nil {
+			skills = []*domain.Skill{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"skills": skills})
+	case http.MethodPost:
+		var skill domain.Skill
+		if err := decodeJSON(w, req, &skill); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		normalized, err := normalizeSkill(&skill)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := r.options.Skills.Upsert(req.Context(), normalized); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, normalized)
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func (r *Router) handleSkillItem(w http.ResponseWriter, req *http.Request) {
+	if req.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.options.Skills == nil {
+		writeErr(w, http.StatusNotImplemented, errors.New("skill repository is not configured"))
+		return
+	}
+	id := strings.TrimPrefix(req.URL.Path, "/api/skills/")
+	if id == "" || strings.Contains(id, "/") {
+		http.NotFound(w, req)
+		return
+	}
+	if !assetIDPattern.MatchString(id) {
+		writeErr(w, http.StatusBadRequest, errors.New("invalid skill id"))
+		return
+	}
+	if req.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	skill, err := r.options.Skills.Get(req.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, err)
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, skill)
+}
+
+func (r *Router) handleTriggerRules(w http.ResponseWriter, req *http.Request) {
+	if req.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.options.TriggerRules == nil {
+		writeErr(w, http.StatusNotImplemented, errors.New("trigger rule repository is not configured"))
+		return
+	}
+	switch req.Method {
+	case http.MethodGet:
+		rules, err := r.options.TriggerRules.List(req.Context())
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		if rules == nil {
+			rules = []*domain.TriggerRule{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"trigger_rules": rules})
+	case http.MethodPost:
+		var rule domain.TriggerRule
+		if err := decodeJSON(w, req, &rule); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		normalized, err := normalizeTriggerRule(&rule)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := r.options.TriggerRules.Upsert(req.Context(), normalized); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, normalized)
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func (r *Router) handleTriggerRuleItem(w http.ResponseWriter, req *http.Request) {
+	if req.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.options.TriggerRules == nil {
+		writeErr(w, http.StatusNotImplemented, errors.New("trigger rule repository is not configured"))
+		return
+	}
+	id := strings.TrimPrefix(req.URL.Path, "/api/trigger-rules/")
+	if id == "" || strings.Contains(id, "/") {
+		http.NotFound(w, req)
+		return
+	}
+	if !assetIDPattern.MatchString(id) {
+		writeErr(w, http.StatusBadRequest, errors.New("invalid trigger rule id"))
+		return
+	}
+	if req.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	rule, err := r.options.TriggerRules.Get(req.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, err)
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rule)
 }
 
 func (r *Router) requireSession(next http.HandlerFunc) http.HandlerFunc {
@@ -493,4 +707,93 @@ func validStatus(status domain.SessionStatus) bool {
 	default:
 		return false
 	}
+}
+
+var assetIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
+
+func normalizeSkill(skill *domain.Skill) (*domain.Skill, error) {
+	skill.SkillID = strings.TrimSpace(skill.SkillID)
+	skill.Name = strings.TrimSpace(skill.Name)
+	skill.Description = strings.TrimSpace(skill.Description)
+	skill.MarkdownContent = strings.TrimSpace(skill.MarkdownContent)
+	skill.UpdatedBy = strings.TrimSpace(skill.UpdatedBy)
+	if !assetIDPattern.MatchString(skill.SkillID) {
+		return nil, fmt.Errorf("invalid skill_id %q", skill.SkillID)
+	}
+	if skill.Name == "" {
+		return nil, errors.New("name is required")
+	}
+	if len([]rune(skill.Name)) > 128 {
+		return nil, errors.New("name exceeds 128 characters")
+	}
+	if skill.MarkdownContent == "" {
+		return nil, errors.New("markdown_content is required")
+	}
+	if skill.UpdatedBy == "" {
+		skill.UpdatedBy = "operator"
+	}
+	if len([]rune(skill.UpdatedBy)) > 64 {
+		return nil, errors.New("updated_by exceeds 64 characters")
+	}
+	if skill.Version <= 0 {
+		skill.Version = 1
+	}
+	skill.TriggerWords = cleanStringList(skill.TriggerWords, 32)
+	return skill, nil
+}
+
+func normalizeTriggerRule(rule *domain.TriggerRule) (*domain.TriggerRule, error) {
+	rule.RuleID = strings.TrimSpace(rule.RuleID)
+	rule.Name = strings.TrimSpace(rule.Name)
+	rule.TriggerSource = strings.TrimSpace(rule.TriggerSource)
+	rule.AgentImage = strings.TrimSpace(rule.AgentImage)
+	rule.PolicyGroup = strings.TrimSpace(rule.PolicyGroup)
+	if !assetIDPattern.MatchString(rule.RuleID) {
+		return nil, fmt.Errorf("invalid rule_id %q", rule.RuleID)
+	}
+	if rule.Name == "" {
+		return nil, errors.New("name is required")
+	}
+	if len([]rune(rule.Name)) > 128 {
+		return nil, errors.New("name exceeds 128 characters")
+	}
+	if rule.TriggerSource == "" {
+		return nil, errors.New("trigger_source is required")
+	}
+	if rule.AgentImage == "" {
+		return nil, errors.New("agent_image is required")
+	}
+	if rule.PolicyGroup == "" {
+		return nil, errors.New("policy_group is required")
+	}
+	if len(rule.MatchExpression) == 0 || !json.Valid(rule.MatchExpression) {
+		return nil, errors.New("match_expression must be valid JSON")
+	}
+	rule.BindSkills = cleanStringList(rule.BindSkills, 64)
+	for _, skillID := range rule.BindSkills {
+		if !assetIDPattern.MatchString(skillID) {
+			return nil, fmt.Errorf("invalid bind skill id %q", skillID)
+		}
+	}
+	return rule, nil
+}
+
+func cleanStringList(values []string, max int) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+		if len(out) >= max {
+			break
+		}
+	}
+	return out
 }

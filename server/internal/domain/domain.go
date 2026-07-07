@@ -2,7 +2,10 @@
 // 结构体与 server/migrations 中的表一一对应。
 package domain
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // SessionStatus 会话生命周期状态。
 type SessionStatus string
@@ -35,16 +38,15 @@ type Session struct {
 }
 
 // TriggerRule 对应 ballast_trigger_rules 表。
-// v0.1 不启用自动化路由，结构体已定义供 v0.2 使用。
 type TriggerRule struct {
-	RuleID          string   `json:"rule_id"`
-	Name            string   `json:"name"`
-	IsActive        bool     `json:"is_active"`
-	TriggerSource   string   `json:"trigger_source"`
-	MatchExpression []byte   `json:"match_expression"` // JSONB 原始字节
-	BindSkills      []string `json:"bind_skills"`
-	AgentImage      string   `json:"agent_image"`
-	PolicyGroup     string   `json:"policy_group"`
+	RuleID          string          `json:"rule_id"`
+	Name            string          `json:"name"`
+	IsActive        bool            `json:"is_active"`
+	TriggerSource   string          `json:"trigger_source"`
+	MatchExpression json.RawMessage `json:"match_expression"` // JSONB 原始字节
+	BindSkills      []string        `json:"bind_skills"`
+	AgentImage      string          `json:"agent_image"`
+	PolicyGroup     string          `json:"policy_group"`
 }
 
 // Skill 对应 ballast_skills 表。

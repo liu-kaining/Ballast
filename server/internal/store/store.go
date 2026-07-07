@@ -11,10 +11,11 @@ import (
 
 // Store 聚合所有表的访问器。
 type Store struct {
-	pool     *pgxpool.Pool
-	Sessions *SessionStore
-	Audit    *AuditStore
-	Skills   *SkillStore
+	pool         *pgxpool.Pool
+	Sessions     *SessionStore
+	Audit        *AuditStore
+	Skills       *SkillStore
+	TriggerRules *TriggerRuleStore
 }
 
 // New 用 DSN 构造连接池并返回 Store。
@@ -31,6 +32,7 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 	s.Sessions = &SessionStore{pool: pool}
 	s.Audit = &AuditStore{pool: pool}
 	s.Skills = &SkillStore{pool: pool}
+	s.TriggerRules = &TriggerRuleStore{pool: pool}
 	return s, nil
 }
 

@@ -37,12 +37,14 @@ services:
       BALLAST_COOKIE_SECURE: "false"
       BALLAST_POLICY_DIR: /etc/ballast/policies
       BALLAST_CONTROL_PLANE_URL: http://host.docker.internal:8080
+      BALLAST_WORKSPACE_ROOT: ${BALLAST_WORKSPACE_ROOT:-/tmp/ballast/sandboxes}
       DATABASE_DSN: postgres://ballast:ballast@postgres:5432/ballast?sslmode=disable
     ports:
       - "${BALLAST_SERVER_PORT:-8080}:8080"
     volumes:
       - ./server/configs/ballast.yaml:/etc/ballast/ballast.yaml:ro
       - ./policies:/etc/ballast/policies:ro
+      - ${BALLAST_WORKSPACE_ROOT:-/tmp/ballast/sandboxes}:${BALLAST_WORKSPACE_ROOT:-/tmp/ballast/sandboxes}
       - /var/run/docker.sock:/var/run/docker.sock
     extra_hosts:
       - "host.docker.internal:host-gateway"

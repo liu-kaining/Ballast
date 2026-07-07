@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,15 +27,22 @@ type SessionRepository interface {
 
 type AuditRepository interface {
 	Append(context.Context, *domain.AuditLog) (int64, error)
+	ListBySession(context.Context, string, int) ([]*domain.AuditLog, error)
+}
+
+type SkillRepository interface {
+	Get(context.Context, string) (*domain.Skill, error)
 }
 
 type Manager struct {
-	sessionsRepo SessionRepository
-	auditRepo    AuditRepository
-	runtime      runtime.SandboxRuntime
-	policy       policy.PolicyEngine
-	defaultImage string
-	hub          *Hub
+	sessionsRepo  SessionRepository
+	auditRepo     AuditRepository
+	skillsRepo    SkillRepository
+	runtime       runtime.SandboxRuntime
+	policy        policy.PolicyEngine
+	defaultImage  string
+	workspaceRoot string
+	hub           *Hub
 
 	mu       sync.RWMutex
 	sessions map[string]*liveSession
@@ -45,6 +55,7 @@ type liveSession struct {
 	pending  *pendingApproval
 	ctx      context.Context
 	cancel   context.CancelFunc
+	cleanup  func()
 }
 
 type pendingApproval struct {
@@ -58,14 +69,29 @@ type approvalResult struct {
 	approver string
 }
 
+type Option func(*Manager)
+
+func WithSkillRepository(repo SkillRepository) Option {
+	return func(m *Manager) {
+		m.skillsRepo = repo
+	}
+}
+
+func WithWorkspaceRoot(root string) Option {
+	return func(m *Manager) {
+		m.workspaceRoot = strings.TrimSpace(root)
+	}
+}
+
 func New(
 	sessions SessionRepository,
 	audit AuditRepository,
 	sandboxRuntime runtime.SandboxRuntime,
 	policyEngine policy.PolicyEngine,
 	defaultImage string,
+	options ...Option,
 ) *Manager {
-	return &Manager{
+	manager := &Manager{
 		sessionsRepo: sessions,
 		auditRepo:    audit,
 		runtime:      sandboxRuntime,
@@ -74,9 +100,13 @@ func New(
 		hub:          NewHub(),
 		sessions:     make(map[string]*liveSession),
 	}
+	for _, option := range options {
+		option(manager)
+	}
+	return manager
 }
 
-func (m *Manager) CreateSession(ctx context.Context, title, agentImage string) (*domain.Session, error) {
+func (m *Manager) CreateSession(ctx context.Context, title, agentImage string, skillIDs ...string) (*domain.Session, error) {
 	if agentImage == "" {
 		agentImage = m.defaultImage
 	}
@@ -85,8 +115,13 @@ func (m *Manager) CreateSession(ctx context.Context, title, agentImage string) (
 	}
 
 	now := time.Now().UTC()
+	sessionID := genID()
+	mounts, cleanup, err := m.prepareSkillMounts(ctx, sessionID, skillIDs)
+	if err != nil {
+		return nil, err
+	}
 	session := &domain.Session{
-		SessionID:   genID(),
+		SessionID:   sessionID,
 		Title:       title,
 		TriggerType: domain.TriggerManualChat,
 		Status:      domain.SessionRunning,
@@ -95,18 +130,20 @@ func (m *Manager) CreateSession(ctx context.Context, title, agentImage string) (
 		UpdatedAt:   now,
 	}
 	if err := m.sessionsRepo.Create(ctx, session); err != nil {
+		cleanup()
 		return nil, fmt.Errorf("create session: %w", err)
 	}
 
 	sessionCtx, cancel := context.WithCancel(context.Background())
-	live := &liveSession{session: session, ctx: sessionCtx, cancel: cancel}
+	live := &liveSession{session: session, ctx: sessionCtx, cancel: cancel, cleanup: cleanup}
 	m.mu.Lock()
 	m.sessions[session.SessionID] = live
 	m.mu.Unlock()
 
-	instance, err := m.runtime.Create(ctx, session.SessionID, agentImage, runtime.Mounts{})
+	instance, err := m.runtime.Create(ctx, session.SessionID, agentImage, mounts)
 	if err != nil {
 		cancel()
+		cleanup()
 		m.deleteLiveSession(session.SessionID)
 		_ = m.sessionsRepo.UpdateStatus(context.Background(), session.SessionID, domain.SessionFailed)
 		return nil, fmt.Errorf("create sandbox: %w", err)
@@ -136,6 +173,16 @@ func (m *Manager) GetSession(ctx context.Context, id string) (*domain.Session, e
 
 func (m *Manager) ListSessions(ctx context.Context, status domain.SessionStatus, limit, offset int) ([]*domain.Session, error) {
 	return m.sessionsRepo.List(ctx, status, limit, offset)
+}
+
+func (m *Manager) ListAudit(ctx context.Context, id string, limit int) ([]*domain.AuditLog, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	return m.auditRepo.ListBySession(ctx, id, limit)
 }
 
 // HandleHarnessEvent forwards a trusted sandbox event and completes the
@@ -368,6 +415,9 @@ func (m *Manager) finishSession(ctx context.Context, id string, userInitiated bo
 			Data: mustJSON(map[string]string{"status": string(status)}),
 		})
 	}
+	if live.cleanup != nil {
+		live.cleanup()
+	}
 	m.deleteLiveSession(id)
 	return nil
 }
@@ -468,4 +518,58 @@ func cloneSession(session *domain.Session) *domain.Session {
 
 func genID() string {
 	return fmt.Sprintf("sess-%d", time.Now().UnixNano())
+}
+
+var skillIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
+
+func (m *Manager) prepareSkillMounts(ctx context.Context, sessionID string, skillIDs []string) (runtime.Mounts, func(), error) {
+	if len(skillIDs) == 0 {
+		return runtime.Mounts{}, func() {}, nil
+	}
+	if m.skillsRepo == nil {
+		return runtime.Mounts{}, func() {}, errors.New("skill repository is not configured")
+	}
+	root := m.workspaceRoot
+	if root == "" {
+		root = filepath.Join(os.TempDir(), "ballast", "sandboxes")
+	}
+	if !filepath.IsAbs(root) {
+		return runtime.Mounts{}, func() {}, fmt.Errorf("workspace root must be absolute: %s", root)
+	}
+	sessionRoot := filepath.Join(root, sessionID)
+	skillsRoot := filepath.Join(sessionRoot, "skills")
+	cleanup := func() {
+		_ = os.RemoveAll(sessionRoot)
+	}
+	if err := os.MkdirAll(skillsRoot, 0o755); err != nil {
+		return runtime.Mounts{}, cleanup, fmt.Errorf("create skills mount: %w", err)
+	}
+
+	seen := make(map[string]struct{}, len(skillIDs))
+	for _, rawID := range skillIDs {
+		skillID := strings.TrimSpace(rawID)
+		if _, ok := seen[skillID]; ok {
+			continue
+		}
+		seen[skillID] = struct{}{}
+		if !skillIDPattern.MatchString(skillID) {
+			cleanup()
+			return runtime.Mounts{}, func() {}, fmt.Errorf("invalid skill id %q", rawID)
+		}
+		skill, err := m.skillsRepo.Get(ctx, skillID)
+		if err != nil {
+			cleanup()
+			return runtime.Mounts{}, func() {}, fmt.Errorf("load skill %s: %w", skillID, err)
+		}
+		skillDir := filepath.Join(skillsRoot, skillID)
+		if err := os.MkdirAll(skillDir, 0o755); err != nil {
+			cleanup()
+			return runtime.Mounts{}, func() {}, fmt.Errorf("create skill dir %s: %w", skillID, err)
+		}
+		if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skill.MarkdownContent), 0o644); err != nil {
+			cleanup()
+			return runtime.Mounts{}, func() {}, fmt.Errorf("write skill %s: %w", skillID, err)
+		}
+	}
+	return runtime.Mounts{SkillsDir: skillsRoot}, cleanup, nil
 }

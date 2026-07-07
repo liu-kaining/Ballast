@@ -70,7 +70,15 @@ func main() {
 	logger.Printf("sandbox runtime ready (image=%s)", runtimeCfg.DefaultImage)
 
 	// 编排器
-	mgr := orchestrator.New(dbStore.Sessions, dbStore.Audit, sandboxRuntime, polEng, runtimeCfg.DefaultImage)
+	mgr := orchestrator.New(
+		dbStore.Sessions,
+		dbStore.Audit,
+		sandboxRuntime,
+		polEng,
+		runtimeCfg.DefaultImage,
+		orchestrator.WithSkillRepository(dbStore.Skills),
+		orchestrator.WithWorkspaceRoot(runtimeCfg.WorkspaceRoot),
+	)
 
 	// HTTP 路由
 	mux := http.NewServeMux()
@@ -89,6 +97,8 @@ func main() {
 		InternalToken:      cfg.Server.InternalToken,
 		CORSAllowedOrigins: cfg.Server.CORSAllowedOrigins,
 		CookieSecure:       cfg.Server.CookieSecure,
+		Skills:             dbStore.Skills,
+		TriggerRules:       dbStore.TriggerRules,
 	})
 
 	srv := &http.Server{

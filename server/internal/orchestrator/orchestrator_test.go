@@ -3,6 +3,8 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -72,15 +74,44 @@ func (m *memoryAudit) Append(_ context.Context, log *domain.AuditLog) (int64, er
 	return int64(len(m.logs)), nil
 }
 
+func (m *memoryAudit) ListBySession(_ context.Context, id string, limit int) ([]*domain.AuditLog, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []*domain.AuditLog
+	for _, log := range m.logs {
+		if log.SessionID == id {
+			cloned := *log
+			out = append(out, &cloned)
+			if limit > 0 && len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+type memorySkills map[string]*domain.Skill
+
+func (m memorySkills) Get(_ context.Context, id string) (*domain.Skill, error) {
+	skill := m[id]
+	if skill == nil {
+		return nil, errors.New("not found")
+	}
+	cloned := *skill
+	return &cloned, nil
+}
+
 type fakeRuntime struct {
 	mu        sync.Mutex
 	created   []string
 	destroyed []string
+	mounts    []runtime.Mounts
 }
 
-func (f *fakeRuntime) Create(_ context.Context, id, _ string, _ runtime.Mounts) (runtime.SandboxInstance, error) {
+func (f *fakeRuntime) Create(_ context.Context, id, _ string, mounts runtime.Mounts) (runtime.SandboxInstance, error) {
 	f.mu.Lock()
 	f.created = append(f.created, id)
+	f.mounts = append(f.mounts, mounts)
 	f.mu.Unlock()
 	return fakeInstance{id: id}, nil
 }
@@ -118,6 +149,53 @@ func newTestManager() (*Manager, *memorySessions, *memoryAudit, *fakeRuntime) {
 	sandbox := &fakeRuntime{}
 	manager := New(sessions, audit, sandbox, commandPolicy{}, "sandbox:test")
 	return manager, sessions, audit, sandbox
+}
+
+func TestCreateSessionMaterializesSelectedSkills(t *testing.T) {
+	sessions := newMemorySessions()
+	audit := &memoryAudit{}
+	sandbox := &fakeRuntime{}
+	root := t.TempDir()
+	manager := New(
+		sessions,
+		audit,
+		sandbox,
+		commandPolicy{},
+		"sandbox:test",
+		WithWorkspaceRoot(root),
+		WithSkillRepository(memorySkills{
+			"k8s-debug": {
+				SkillID:         "k8s-debug",
+				Name:            "K8s Debug",
+				MarkdownContent: "---\nname: k8s-debug\n---\n# Debug\n",
+			},
+		}),
+	)
+
+	session, err := manager.CreateSession(context.Background(), "with skill", "", "k8s-debug")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sandbox.mu.Lock()
+	if len(sandbox.mounts) != 1 || sandbox.mounts[0].SkillsDir == "" {
+		t.Fatalf("mounts = %#v", sandbox.mounts)
+	}
+	skillsDir := sandbox.mounts[0].SkillsDir
+	sandbox.mu.Unlock()
+
+	content, err := os.ReadFile(filepath.Join(skillsDir, "k8s-debug", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) == "" {
+		t.Fatal("empty materialized skill")
+	}
+	if err := manager.Destroy(context.Background(), session.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, session.SessionID)); !os.IsNotExist(err) {
+		t.Fatalf("session workspace was not cleaned up: %v", err)
+	}
 }
 
 func TestSessionLifecycleRequiresCommandSpecificApproval(t *testing.T) {
