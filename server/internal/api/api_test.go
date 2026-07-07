@@ -96,6 +96,7 @@ func TestSkillAndTriggerRuleAPIs(t *testing.T) {
 	mux := http.NewServeMux()
 	skills := newMemorySkillRepo()
 	rules := newMemoryTriggerRuleRepo()
+	mcpPlugins := newMemoryMCPPluginRepo()
 	NewRouter(mux, nil, log.New(io.Discard, "", 0), Options{
 		AdminToken:         "admin",
 		SessionSecret:      "secret",
@@ -103,6 +104,7 @@ func TestSkillAndTriggerRuleAPIs(t *testing.T) {
 		CORSAllowedOrigins: []string{"http://localhost:3000"},
 		Skills:             skills,
 		TriggerRules:       rules,
+		MCPPlugins:         mcpPlugins,
 	})
 	cookie := &http.Cookie{Name: sessionCookieName, Value: signSession(time.Now().Add(time.Hour), "secret")}
 
@@ -140,6 +142,51 @@ func TestSkillAndTriggerRuleAPIs(t *testing.T) {
 	mux.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("get trigger rule status = %d body=%s", response.Code, response.Body.String())
+	}
+
+	mcpBody := `{"plugin_id":"prometheus","name":"Prometheus MCP","command":"prometheus-mcp","args":["--stdio"],"env":{"PROM_URL":"http://prometheus:9090"},"is_active":true,"updated_by":"tester"}`
+	request = httptest.NewRequest(http.MethodPost, "/api/mcp-plugins", strings.NewReader(mcpBody))
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(cookie)
+	response = httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("upsert mcp plugin status = %d body=%s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/api/mcp-plugins/prometheus", nil)
+	request.AddCookie(cookie)
+	response = httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("get mcp plugin status = %d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestTriggerRuleMatchesAlertmanagerPayload(t *testing.T) {
+	rule := &domain.TriggerRule{
+		MatchExpression: json.RawMessage(`{"alertname":"K8sPodCrashLooping","severity":"critical"}`),
+	}
+	payload := json.RawMessage(`{
+		"receiver": "ballast",
+		"alerts": [
+			{"labels": {"alertname": "Other", "severity": "warning"}},
+			{"labels": {"alertname": "K8sPodCrashLooping", "severity": "critical"}}
+		]
+	}`)
+	if !triggerRuleMatches(rule, payload) {
+		t.Fatal("alertmanager labels did not match")
+	}
+}
+
+func TestNormalizeMCPPluginRejectsShellCommand(t *testing.T) {
+	_, err := normalizeMCPPlugin(&domain.MCPPlugin{
+		PluginID: "bad",
+		Name:     "Bad",
+		Command:  "sh -c rm -rf /",
+	})
+	if err == nil {
+		t.Fatal("expected shell-style command to be rejected")
 	}
 }
 
@@ -185,6 +232,45 @@ func (m *memorySkillRepo) List(context.Context) ([]*domain.Skill, error) {
 type memoryTriggerRuleRepo struct {
 	mu    sync.Mutex
 	rules map[string]*domain.TriggerRule
+}
+
+type memoryMCPPluginRepo struct {
+	mu      sync.Mutex
+	plugins map[string]*domain.MCPPlugin
+}
+
+func newMemoryMCPPluginRepo() *memoryMCPPluginRepo {
+	return &memoryMCPPluginRepo{plugins: make(map[string]*domain.MCPPlugin)}
+}
+
+func (m *memoryMCPPluginRepo) Upsert(_ context.Context, plugin *domain.MCPPlugin) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cloned := *plugin
+	m.plugins[plugin.PluginID] = &cloned
+	return nil
+}
+
+func (m *memoryMCPPluginRepo) Get(_ context.Context, id string) (*domain.MCPPlugin, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	plugin := m.plugins[id]
+	if plugin == nil {
+		return nil, store.ErrNotFound
+	}
+	cloned := *plugin
+	return &cloned, nil
+}
+
+func (m *memoryMCPPluginRepo) List(context.Context) ([]*domain.MCPPlugin, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]*domain.MCPPlugin, 0, len(m.plugins))
+	for _, plugin := range m.plugins {
+		cloned := *plugin
+		out = append(out, &cloned)
+	}
+	return out, nil
 }
 
 func newMemoryTriggerRuleRepo() *memoryTriggerRuleRepo {

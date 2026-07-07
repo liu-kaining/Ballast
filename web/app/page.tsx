@@ -22,8 +22,8 @@ export default function HomePage() {
       </nav>
 
       <section style={{ marginTop: 48, color: "var(--muted)", fontSize: 14, lineHeight: 1.8 }}>
-        <p>v0.1 范围：控制面骨架 + SandboxRuntime SPI(Docker) + Harness-Agent(PTY 劫持) + OPA 策略引擎 + Mock OpenCode 引擎。</p>
-        <p>真实 OpenCode 接入、告警自动路由、Web-TTY 双向接管留待 v0.2+。</p>
+        <p>当前范围：控制面 + Docker 沙箱 + Harness-Agent + OPA 审批 + Skill/MCP 资产挂载 + Webhook/Cron 自动触发。</p>
+        <p>真实 OpenCode CLI、真实 Vault、Web-TTY 双向接管和 Git PR 自动提交保持可插拔扩展。</p>
       </section>
     </main>
   );

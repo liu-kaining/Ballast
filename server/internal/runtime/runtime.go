@@ -35,7 +35,7 @@ type ExtraMount struct {
 
 // SandboxRuntime 是沙箱运行时的抽象。实现方须保证：
 //   - Create 拉起一个完全隔离的环境
-//   - InjectJITCredential 注入生命周期极短的临时凭证（v0.1 stub）
+//   - InjectJITCredential 注入生命周期极短的临时凭证；未配置真实凭证提供方时必须拒绝
 //   - Destroy 强行物理销毁沙箱，抹除所有痕迹
 type SandboxRuntime interface {
 	Create(ctx context.Context, sessionID string, imageName string, volume Mounts) (SandboxInstance, error)

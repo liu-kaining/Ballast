@@ -7,8 +7,10 @@ import {
   createSession,
   listSkills,
   listTriggerRules,
+  listMCPPlugins,
   upsertSkill,
   upsertTriggerRule,
+  upsertMCPPlugin,
   login,
   logout,
   APIError,
@@ -17,6 +19,7 @@ import {
   type SessionStatus,
   type Skill,
   type TriggerRule,
+  type MCPPlugin,
 } from "@/lib/api";
 
 const STATUS_COLORS: Record<SessionStatus, string> = {
@@ -36,22 +39,29 @@ export default function SessionsPage() {
   const [token, setToken] = useState("");
   const [skills, setSkills] = useState<Skill[]>([]);
   const [triggerRules, setTriggerRules] = useState<TriggerRule[]>([]);
+  const [mcpPlugins, setMCPPlugins] = useState<MCPPlugin[]>([]);
   const [selectedSkillIDs, setSelectedSkillIDs] = useState<string[]>([]);
+  const [selectedMCPPluginIDs, setSelectedMCPPluginIDs] = useState<string[]>([]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [list, skillList, ruleList] = await Promise.all([
+      const [list, skillList, ruleList, mcpList] = await Promise.all([
         listSessions(),
         listSkills(),
         listTriggerRules(),
+        listMCPPlugins(),
       ]);
       setSessions(list);
       setSkills(skillList);
       setTriggerRules(ruleList);
+      setMCPPlugins(mcpList);
       setSelectedSkillIDs((current) =>
         current.filter((id) => skillList.some((skill) => skill.skill_id === id))
+      );
+      setSelectedMCPPluginIDs((current) =>
+        current.filter((id) => mcpList.some((plugin) => plugin.plugin_id === id))
       );
     } catch (e: unknown) {
       if (e instanceof APIError && e.status === 401) {
@@ -71,7 +81,12 @@ export default function SessionsPage() {
     setCreating(true);
     setError(null);
     try {
-      await createSession(title, "ballast-runner-base:dev", selectedSkillIDs);
+      await createSession(
+        title,
+        "ballast-runner-base:dev",
+        selectedSkillIDs,
+        selectedMCPPluginIDs
+      );
       await refresh();
     } catch (e: unknown) {
       setError(errorMessage(e));
@@ -145,8 +160,35 @@ export default function SessionsPage() {
     }
   }
 
+  async function handleSeedMCPPlugin() {
+    setCreating(true);
+    setError(null);
+    try {
+      await upsertMCPPlugin({
+        plugin_id: "prometheus",
+        name: "Prometheus MCP",
+        command: "prometheus-mcp",
+        args: ["--stdio"],
+        env: { PROM_URL: "http://prometheus:9090" },
+        is_active: true,
+        updated_by: "operator",
+      });
+      await refresh();
+    } catch (e: unknown) {
+      setError(errorMessage(e));
+    } finally {
+      setCreating(false);
+    }
+  }
+
   function toggleSkill(id: string) {
     setSelectedSkillIDs((current) =>
+      current.includes(id) ? current.filter((item) => item !== id) : [...current, id]
+    );
+  }
+
+  function toggleMCPPlugin(id: string) {
+    setSelectedMCPPluginIDs((current) =>
       current.includes(id) ? current.filter((item) => item !== id) : [...current, id]
     );
   }
@@ -242,7 +284,7 @@ export default function SessionsPage() {
         <section
           style={{
             display: "grid",
-            gridTemplateColumns: "1fr 1fr",
+            gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
             gap: 16,
             marginBottom: 24,
           }}
@@ -274,13 +316,40 @@ export default function SessionsPage() {
             )}
           </AssetPanel>
           <AssetPanel
+            title="MCP 插件"
+            actionLabel="写入示例 MCP"
+            onAction={handleSeedMCPPlugin}
+            busy={creating}
+          >
+            {mcpPlugins.length === 0 ? (
+              <p style={mutedStyle()}>暂无 MCP 插件。可写入示例后生成 mcp_config.json 挂载进沙箱。</p>
+            ) : (
+              mcpPlugins.map((plugin) => (
+                <label key={plugin.plugin_id} style={assetRowStyle()}>
+                  <input
+                    type="checkbox"
+                    checked={selectedMCPPluginIDs.includes(plugin.plugin_id)}
+                    onChange={() => toggleMCPPlugin(plugin.plugin_id)}
+                    disabled={!plugin.is_active}
+                  />
+                  <span>
+                    <strong>{plugin.name}</strong>
+                    <code style={{ display: "block", color: "var(--muted)" }}>
+                      {plugin.plugin_id} · {plugin.command}
+                    </code>
+                  </span>
+                </label>
+              ))
+            )}
+          </AssetPanel>
+          <AssetPanel
             title="触发路由"
             actionLabel="写入示例路由"
             onAction={handleSeedRule}
             busy={creating}
           >
             {triggerRules.length === 0 ? (
-              <p style={mutedStyle()}>暂无自动化路由。v0.1 提供资产管理，Webhook/Cron 执行在 v0.2。</p>
+              <p style={mutedStyle()}>暂无自动化路由。Webhook 入口与 Cron 调度会读取这里的规则。</p>
             ) : (
               triggerRules.map((rule) => (
                 <div key={rule.rule_id} style={assetRowStyle()}>

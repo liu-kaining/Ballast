@@ -18,7 +18,7 @@ runtime_provider:
     control_plane_url: "${BALLAST_CONTROL_PLANE_URL:-http://host.docker.internal:8080}"
 
 credential_center:
-  provider: "hashicorp_vault"  # v0.1 为 stub，不真实对接
+  provider: "hashicorp_vault"  # 本地默认不注入凭证；生产需配置真实 Vault/JIT provider
   endpoint: "https://vault.internal.com:8200"
   auth_token_env: "VAULT_TOKEN"
 

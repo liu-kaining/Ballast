@@ -49,6 +49,19 @@ type TriggerRule struct {
 	PolicyGroup     string          `json:"policy_group"`
 }
 
+// MCPPlugin 对应 ballast_mcp_plugins 表。
+// Env 存储注入沙箱 mcp_config.json 的环境变量，调用方必须避免写入长期生产密钥。
+type MCPPlugin struct {
+	PluginID  string            `json:"plugin_id"`
+	Name      string            `json:"name"`
+	Command   string            `json:"command"`
+	Args      []string          `json:"args"`
+	Env       map[string]string `json:"env"`
+	IsActive  bool              `json:"is_active"`
+	UpdatedBy string            `json:"updated_by"`
+	UpdatedAt time.Time         `json:"updated_at"`
+}
+
 // Skill 对应 ballast_skills 表。
 // MarkdownContent 是带 Frontmatter 的标准 OpenCode SKILL.md。
 type Skill struct {

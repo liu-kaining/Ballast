@@ -16,6 +16,7 @@ type Store struct {
 	Audit        *AuditStore
 	Skills       *SkillStore
 	TriggerRules *TriggerRuleStore
+	MCPPlugins   *MCPPluginStore
 }
 
 // New 用 DSN 构造连接池并返回 Store。
@@ -33,6 +34,7 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 	s.Audit = &AuditStore{pool: pool}
 	s.Skills = &SkillStore{pool: pool}
 	s.TriggerRules = &TriggerRuleStore{pool: pool}
+	s.MCPPlugins = &MCPPluginStore{pool: pool}
 	return s, nil
 }
 

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ballast/ballast-server/internal/api"
+	"github.com/ballast/ballast-server/internal/automation"
 	"github.com/ballast/ballast-server/internal/config"
 	"github.com/ballast/ballast-server/internal/orchestrator"
 	"github.com/ballast/ballast-server/internal/policy/opa"
@@ -77,6 +78,7 @@ func main() {
 		polEng,
 		runtimeCfg.DefaultImage,
 		orchestrator.WithSkillRepository(dbStore.Skills),
+		orchestrator.WithMCPPluginRepository(dbStore.MCPPlugins),
 		orchestrator.WithWorkspaceRoot(runtimeCfg.WorkspaceRoot),
 	)
 
@@ -99,7 +101,12 @@ func main() {
 		CookieSecure:       cfg.Server.CookieSecure,
 		Skills:             dbStore.Skills,
 		TriggerRules:       dbStore.TriggerRules,
+		MCPPlugins:         dbStore.MCPPlugins,
 	})
+
+	automationCtx, stopAutomation := context.WithCancel(context.Background())
+	defer stopAutomation()
+	go automation.NewScheduler(dbStore.TriggerRules, mgr, logger, 30*time.Second).Start(automationCtx)
 
 	srv := &http.Server{
 		Addr:              cfg.Server.Address,
@@ -142,6 +149,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	stopReload()
+	stopAutomation()
 	if err := mgr.Shutdown(ctx); err != nil {
 		logger.Printf("sandbox shutdown error: %v", err)
 	}

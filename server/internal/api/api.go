@@ -40,6 +40,7 @@ type Options struct {
 	CookieSecure       bool
 	Skills             SkillRepository
 	TriggerRules       TriggerRuleRepository
+	MCPPlugins         MCPPluginRepository
 }
 
 type SkillRepository interface {
@@ -52,6 +53,12 @@ type TriggerRuleRepository interface {
 	Upsert(context.Context, *domain.TriggerRule) error
 	Get(context.Context, string) (*domain.TriggerRule, error)
 	List(context.Context) ([]*domain.TriggerRule, error)
+}
+
+type MCPPluginRepository interface {
+	Upsert(context.Context, *domain.MCPPlugin) error
+	Get(context.Context, string) (*domain.MCPPlugin, error)
+	List(context.Context) ([]*domain.MCPPlugin, error)
 }
 
 type Router struct {
@@ -84,8 +91,11 @@ func NewRouter(mux *http.ServeMux, manager *orchestrator.Manager, logger *log.Lo
 	mux.HandleFunc("/api/skills/", r.withCORS(r.requireSession(r.handleSkillItem)))
 	mux.HandleFunc("/api/trigger-rules", r.withCORS(r.requireSession(r.handleTriggerRules)))
 	mux.HandleFunc("/api/trigger-rules/", r.withCORS(r.requireSession(r.handleTriggerRuleItem)))
+	mux.HandleFunc("/api/mcp-plugins", r.withCORS(r.requireSession(r.handleMCPPlugins)))
+	mux.HandleFunc("/api/mcp-plugins/", r.withCORS(r.requireSession(r.handleMCPPluginItem)))
 	mux.HandleFunc("/api/internal/harness/report", r.requireInternal(r.handleHarnessReport))
 	mux.HandleFunc("/api/internal/harness/event", r.requireInternal(r.handleHarnessEvent))
+	mux.HandleFunc("/api/internal/triggers/webhook/", r.requireInternal(r.handleInternalWebhookTrigger))
 	return r
 }
 
@@ -192,9 +202,10 @@ func (r *Router) listSessions(w http.ResponseWriter, req *http.Request) {
 
 func (r *Router) createSession(w http.ResponseWriter, req *http.Request) {
 	var body struct {
-		Title      string   `json:"title"`
-		AgentImage string   `json:"agent_image"`
-		SkillIDs   []string `json:"skill_ids"`
+		Title        string   `json:"title"`
+		AgentImage   string   `json:"agent_image"`
+		SkillIDs     []string `json:"skill_ids"`
+		MCPPluginIDs []string `json:"mcp_plugin_ids"`
 	}
 	if err := decodeJSON(w, req, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -208,7 +219,13 @@ func (r *Router) createSession(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, http.StatusBadRequest, errors.New("title exceeds 255 characters"))
 		return
 	}
-	session, err := r.manager.CreateSession(req.Context(), body.Title, body.AgentImage, body.SkillIDs...)
+	session, err := r.manager.CreateSessionWithOptions(req.Context(), orchestrator.CreateSessionOptions{
+		Title:        body.Title,
+		AgentImage:   body.AgentImage,
+		TriggerType:  domain.TriggerManualChat,
+		SkillIDs:     body.SkillIDs,
+		MCPPluginIDs: body.MCPPluginIDs,
+	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
@@ -564,6 +581,132 @@ func (r *Router) handleTriggerRuleItem(w http.ResponseWriter, req *http.Request)
 	writeJSON(w, http.StatusOK, rule)
 }
 
+func (r *Router) handleMCPPlugins(w http.ResponseWriter, req *http.Request) {
+	if req.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.options.MCPPlugins == nil {
+		writeErr(w, http.StatusNotImplemented, errors.New("mcp plugin repository is not configured"))
+		return
+	}
+	switch req.Method {
+	case http.MethodGet:
+		plugins, err := r.options.MCPPlugins.List(req.Context())
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		if plugins == nil {
+			plugins = []*domain.MCPPlugin{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"mcp_plugins": plugins})
+	case http.MethodPost:
+		var plugin domain.MCPPlugin
+		if err := decodeJSON(w, req, &plugin); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		normalized, err := normalizeMCPPlugin(&plugin)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := r.options.MCPPlugins.Upsert(req.Context(), normalized); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, normalized)
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func (r *Router) handleMCPPluginItem(w http.ResponseWriter, req *http.Request) {
+	if req.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.options.MCPPlugins == nil {
+		writeErr(w, http.StatusNotImplemented, errors.New("mcp plugin repository is not configured"))
+		return
+	}
+	id := strings.TrimPrefix(req.URL.Path, "/api/mcp-plugins/")
+	if id == "" || strings.Contains(id, "/") {
+		http.NotFound(w, req)
+		return
+	}
+	if !assetIDPattern.MatchString(id) {
+		writeErr(w, http.StatusBadRequest, errors.New("invalid mcp plugin id"))
+		return
+	}
+	if req.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	plugin, err := r.options.MCPPlugins.Get(req.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, err)
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, plugin)
+}
+
+func (r *Router) handleInternalWebhookTrigger(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if r.options.TriggerRules == nil {
+		writeErr(w, http.StatusNotImplemented, errors.New("trigger rule repository is not configured"))
+		return
+	}
+	source := strings.TrimPrefix(req.URL.Path, "/api/internal/triggers/webhook/")
+	if source == "" || strings.Contains(source, "/") {
+		http.NotFound(w, req)
+		return
+	}
+	if len([]rune(source)) > 64 {
+		writeErr(w, http.StatusBadRequest, errors.New("trigger source exceeds 64 characters"))
+		return
+	}
+	var payload json.RawMessage
+	if err := decodeJSON(w, req, &payload); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	rules, err := r.options.TriggerRules.List(req.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	created := make([]*domain.Session, 0)
+	for _, rule := range rules {
+		if !rule.IsActive || !strings.EqualFold(rule.TriggerSource, source) {
+			continue
+		}
+		if !triggerRuleMatches(rule, payload) {
+			continue
+		}
+		session, err := r.manager.CreateSessionWithOptions(req.Context(), orchestrator.CreateSessionOptions{
+			Title:       webhookSessionTitle(rule, payload),
+			AgentImage:  rule.AgentImage,
+			TriggerType: domain.TriggerWebhook,
+			SkillIDs:    rule.BindSkills,
+		})
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		created = append(created, session)
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"sessions": created})
+}
+
 func (r *Router) requireSession(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		if req.Method == http.MethodOptions {
@@ -778,6 +921,55 @@ func normalizeTriggerRule(rule *domain.TriggerRule) (*domain.TriggerRule, error)
 	return rule, nil
 }
 
+func normalizeMCPPlugin(plugin *domain.MCPPlugin) (*domain.MCPPlugin, error) {
+	plugin.PluginID = strings.TrimSpace(plugin.PluginID)
+	plugin.Name = strings.TrimSpace(plugin.Name)
+	plugin.Command = strings.TrimSpace(plugin.Command)
+	plugin.UpdatedBy = strings.TrimSpace(plugin.UpdatedBy)
+	if !assetIDPattern.MatchString(plugin.PluginID) {
+		return nil, fmt.Errorf("invalid plugin_id %q", plugin.PluginID)
+	}
+	if plugin.Name == "" {
+		return nil, errors.New("name is required")
+	}
+	if len([]rune(plugin.Name)) > 128 {
+		return nil, errors.New("name exceeds 128 characters")
+	}
+	if plugin.Command == "" {
+		return nil, errors.New("command is required")
+	}
+	if len([]rune(plugin.Command)) > 255 {
+		return nil, errors.New("command exceeds 255 characters")
+	}
+	if strings.ContainsAny(plugin.Command, " \t") || containsShellControl(plugin.Command) {
+		return nil, errors.New("command must be a single executable path/name")
+	}
+	if plugin.UpdatedBy == "" {
+		plugin.UpdatedBy = "operator"
+	}
+	if len([]rune(plugin.UpdatedBy)) > 64 {
+		return nil, errors.New("updated_by exceeds 64 characters")
+	}
+	plugin.Args = cleanOrderedStringList(plugin.Args, 64)
+	for _, arg := range plugin.Args {
+		if len([]rune(arg)) > 512 {
+			return nil, errors.New("mcp argument exceeds 512 characters")
+		}
+	}
+	if plugin.Env == nil {
+		plugin.Env = map[string]string{}
+	}
+	for key, value := range plugin.Env {
+		if !envKeyPattern.MatchString(key) {
+			return nil, fmt.Errorf("invalid env key %q", key)
+		}
+		if len([]rune(value)) > 2048 {
+			return nil, fmt.Errorf("env value for %s exceeds 2048 characters", key)
+		}
+	}
+	return plugin, nil
+}
+
 func cleanStringList(values []string, max int) []string {
 	seen := make(map[string]struct{}, len(values))
 	out := make([]string, 0, len(values))
@@ -796,4 +988,120 @@ func cleanStringList(values []string, max int) []string {
 		}
 	}
 	return out
+}
+
+func cleanOrderedStringList(values []string, max int) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		out = append(out, value)
+		if len(out) >= max {
+			break
+		}
+	}
+	return out
+}
+
+var envKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+func triggerRuleMatches(rule *domain.TriggerRule, payload json.RawMessage) bool {
+	var expected map[string]any
+	if err := json.Unmarshal(rule.MatchExpression, &expected); err != nil {
+		return false
+	}
+	if len(expected) == 0 {
+		return true
+	}
+	var decoded any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		return false
+	}
+	for _, candidate := range triggerCandidates(decoded) {
+		if jsonSubset(candidate, expected) {
+			return true
+		}
+	}
+	return false
+}
+
+func triggerCandidates(value any) []any {
+	candidates := []any{value}
+	root, ok := value.(map[string]any)
+	if !ok {
+		return candidates
+	}
+	for _, key := range []string{"labels", "commonLabels"} {
+		if nested, ok := root[key]; ok {
+			candidates = append(candidates, nested)
+		}
+	}
+	if alerts, ok := root["alerts"].([]any); ok {
+		for _, alert := range alerts {
+			candidates = append(candidates, alert)
+			if alertMap, ok := alert.(map[string]any); ok {
+				if labels, ok := alertMap["labels"]; ok {
+					candidates = append(candidates, labels)
+				}
+			}
+		}
+	}
+	return candidates
+}
+
+func jsonSubset(candidate any, expected map[string]any) bool {
+	candidateMap, ok := candidate.(map[string]any)
+	if !ok {
+		return false
+	}
+	for key, expectedValue := range expected {
+		candidateValue, ok := candidateMap[key]
+		if !ok {
+			return false
+		}
+		expectedObject, expectedIsObject := expectedValue.(map[string]any)
+		if expectedIsObject {
+			if !jsonSubset(candidateValue, expectedObject) {
+				return false
+			}
+			continue
+		}
+		if !jsonScalarEqual(candidateValue, expectedValue) {
+			return false
+		}
+	}
+	return true
+}
+
+func jsonScalarEqual(left, right any) bool {
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && string(leftJSON) == string(rightJSON)
+}
+
+func webhookSessionTitle(rule *domain.TriggerRule, payload json.RawMessage) string {
+	var decoded any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		return rule.Name
+	}
+	for _, candidate := range triggerCandidates(decoded) {
+		if m, ok := candidate.(map[string]any); ok {
+			if alertName, ok := m["alertname"].(string); ok && alertName != "" {
+				return fmt.Sprintf("%s: %s", rule.Name, alertName)
+			}
+		}
+	}
+	return rule.Name
+}
+
+func containsShellControl(command string) bool {
+	for _, character := range command {
+		switch character {
+		case ';', '&', '|', '>', '<', '`', '$', '(', ')', '\r', '\n':
+			return true
+		}
+	}
+	return false
 }

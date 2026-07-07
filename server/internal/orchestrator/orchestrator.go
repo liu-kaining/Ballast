@@ -34,10 +34,15 @@ type SkillRepository interface {
 	Get(context.Context, string) (*domain.Skill, error)
 }
 
+type MCPPluginRepository interface {
+	Get(context.Context, string) (*domain.MCPPlugin, error)
+}
+
 type Manager struct {
 	sessionsRepo  SessionRepository
 	auditRepo     AuditRepository
 	skillsRepo    SkillRepository
+	mcpRepo       MCPPluginRepository
 	runtime       runtime.SandboxRuntime
 	policy        policy.PolicyEngine
 	defaultImage  string
@@ -77,10 +82,24 @@ func WithSkillRepository(repo SkillRepository) Option {
 	}
 }
 
+func WithMCPPluginRepository(repo MCPPluginRepository) Option {
+	return func(m *Manager) {
+		m.mcpRepo = repo
+	}
+}
+
 func WithWorkspaceRoot(root string) Option {
 	return func(m *Manager) {
 		m.workspaceRoot = strings.TrimSpace(root)
 	}
+}
+
+type CreateSessionOptions struct {
+	Title        string
+	AgentImage   string
+	TriggerType  domain.TriggerType
+	SkillIDs     []string
+	MCPPluginIDs []string
 }
 
 func New(
@@ -107,6 +126,24 @@ func New(
 }
 
 func (m *Manager) CreateSession(ctx context.Context, title, agentImage string, skillIDs ...string) (*domain.Session, error) {
+	return m.CreateSessionWithOptions(ctx, CreateSessionOptions{
+		Title:       title,
+		AgentImage:  agentImage,
+		TriggerType: domain.TriggerManualChat,
+		SkillIDs:    skillIDs,
+	})
+}
+
+func (m *Manager) CreateSessionWithOptions(ctx context.Context, opts CreateSessionOptions) (*domain.Session, error) {
+	title := strings.TrimSpace(opts.Title)
+	if title == "" {
+		title = "未命名会话"
+	}
+	triggerType := opts.TriggerType
+	if triggerType == "" {
+		triggerType = domain.TriggerManualChat
+	}
+	agentImage := opts.AgentImage
 	if agentImage == "" {
 		agentImage = m.defaultImage
 	}
@@ -116,14 +153,14 @@ func (m *Manager) CreateSession(ctx context.Context, title, agentImage string, s
 
 	now := time.Now().UTC()
 	sessionID := genID()
-	mounts, cleanup, err := m.prepareSkillMounts(ctx, sessionID, skillIDs)
+	mounts, cleanup, err := m.prepareAssetMounts(ctx, sessionID, opts.SkillIDs, opts.MCPPluginIDs)
 	if err != nil {
 		return nil, err
 	}
 	session := &domain.Session{
 		SessionID:   sessionID,
 		Title:       title,
-		TriggerType: domain.TriggerManualChat,
+		TriggerType: triggerType,
 		Status:      domain.SessionRunning,
 		AgentImage:  agentImage,
 		CreatedAt:   now,
@@ -522,12 +559,15 @@ func genID() string {
 
 var skillIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
 
-func (m *Manager) prepareSkillMounts(ctx context.Context, sessionID string, skillIDs []string) (runtime.Mounts, func(), error) {
-	if len(skillIDs) == 0 {
+func (m *Manager) prepareAssetMounts(ctx context.Context, sessionID string, skillIDs, mcpPluginIDs []string) (runtime.Mounts, func(), error) {
+	if len(skillIDs) == 0 && len(mcpPluginIDs) == 0 {
 		return runtime.Mounts{}, func() {}, nil
 	}
-	if m.skillsRepo == nil {
+	if len(skillIDs) > 0 && m.skillsRepo == nil {
 		return runtime.Mounts{}, func() {}, errors.New("skill repository is not configured")
+	}
+	if len(mcpPluginIDs) > 0 && m.mcpRepo == nil {
+		return runtime.Mounts{}, func() {}, errors.New("mcp plugin repository is not configured")
 	}
 	root := m.workspaceRoot
 	if root == "" {
@@ -538,38 +578,113 @@ func (m *Manager) prepareSkillMounts(ctx context.Context, sessionID string, skil
 	}
 	sessionRoot := filepath.Join(root, sessionID)
 	skillsRoot := filepath.Join(sessionRoot, "skills")
+	mcpConfigPath := filepath.Join(sessionRoot, "mcp_config.json")
 	cleanup := func() {
 		_ = os.RemoveAll(sessionRoot)
 	}
-	if err := os.MkdirAll(skillsRoot, 0o755); err != nil {
-		return runtime.Mounts{}, cleanup, fmt.Errorf("create skills mount: %w", err)
+	if err := os.MkdirAll(sessionRoot, 0o755); err != nil {
+		return runtime.Mounts{}, cleanup, fmt.Errorf("create session workspace: %w", err)
 	}
 
+	mounts := runtime.Mounts{}
+	if len(skillIDs) > 0 {
+		if err := os.MkdirAll(skillsRoot, 0o755); err != nil {
+			return runtime.Mounts{}, cleanup, fmt.Errorf("create skills mount: %w", err)
+		}
+		if err := m.materializeSkills(ctx, skillsRoot, skillIDs); err != nil {
+			cleanup()
+			return runtime.Mounts{}, func() {}, err
+		}
+		mounts.SkillsDir = skillsRoot
+	}
+
+	if len(mcpPluginIDs) > 0 {
+		if err := m.materializeMCPConfig(ctx, mcpConfigPath, mcpPluginIDs); err != nil {
+			cleanup()
+			return runtime.Mounts{}, func() {}, err
+		}
+		mounts.Extra = append(mounts.Extra, runtime.ExtraMount{
+			Source:      mcpConfigPath,
+			Destination: "/workspace/.opencode/mcp_config.json",
+			ReadOnly:    true,
+		})
+	}
+	return mounts, cleanup, nil
+}
+
+func (m *Manager) materializeSkills(ctx context.Context, skillsRoot string, skillIDs []string) error {
 	seen := make(map[string]struct{}, len(skillIDs))
 	for _, rawID := range skillIDs {
-		skillID := strings.TrimSpace(rawID)
+		skillID, err := normalizeAssetID(rawID)
+		if err != nil {
+			return fmt.Errorf("invalid skill id %q", rawID)
+		}
 		if _, ok := seen[skillID]; ok {
 			continue
 		}
 		seen[skillID] = struct{}{}
-		if !skillIDPattern.MatchString(skillID) {
-			cleanup()
-			return runtime.Mounts{}, func() {}, fmt.Errorf("invalid skill id %q", rawID)
-		}
 		skill, err := m.skillsRepo.Get(ctx, skillID)
 		if err != nil {
-			cleanup()
-			return runtime.Mounts{}, func() {}, fmt.Errorf("load skill %s: %w", skillID, err)
+			return fmt.Errorf("load skill %s: %w", skillID, err)
 		}
 		skillDir := filepath.Join(skillsRoot, skillID)
 		if err := os.MkdirAll(skillDir, 0o755); err != nil {
-			cleanup()
-			return runtime.Mounts{}, func() {}, fmt.Errorf("create skill dir %s: %w", skillID, err)
+			return fmt.Errorf("create skill dir %s: %w", skillID, err)
 		}
 		if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skill.MarkdownContent), 0o644); err != nil {
-			cleanup()
-			return runtime.Mounts{}, func() {}, fmt.Errorf("write skill %s: %w", skillID, err)
+			return fmt.Errorf("write skill %s: %w", skillID, err)
 		}
 	}
-	return runtime.Mounts{SkillsDir: skillsRoot}, cleanup, nil
+	return nil
+}
+
+func (m *Manager) materializeMCPConfig(ctx context.Context, path string, pluginIDs []string) error {
+	type serverConfig struct {
+		Command string            `json:"command"`
+		Args    []string          `json:"args"`
+		Env     map[string]string `json:"env,omitempty"`
+	}
+	config := struct {
+		MCPServers map[string]serverConfig `json:"mcpServers"`
+	}{MCPServers: map[string]serverConfig{}}
+
+	seen := make(map[string]struct{}, len(pluginIDs))
+	for _, rawID := range pluginIDs {
+		pluginID, err := normalizeAssetID(rawID)
+		if err != nil {
+			return fmt.Errorf("invalid mcp plugin id %q", rawID)
+		}
+		if _, ok := seen[pluginID]; ok {
+			continue
+		}
+		seen[pluginID] = struct{}{}
+		plugin, err := m.mcpRepo.Get(ctx, pluginID)
+		if err != nil {
+			return fmt.Errorf("load mcp plugin %s: %w", pluginID, err)
+		}
+		if !plugin.IsActive {
+			continue
+		}
+		config.MCPServers[pluginID] = serverConfig{
+			Command: plugin.Command,
+			Args:    plugin.Args,
+			Env:     plugin.Env,
+		}
+	}
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal mcp config: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("write mcp config: %w", err)
+	}
+	return nil
+}
+
+func normalizeAssetID(raw string) (string, error) {
+	id := strings.TrimSpace(raw)
+	if !skillIDPattern.MatchString(id) {
+		return "", errors.New("invalid id")
+	}
+	return id, nil
 }

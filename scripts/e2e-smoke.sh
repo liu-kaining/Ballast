@@ -3,6 +3,7 @@ set -euo pipefail
 
 api_base="${BALLAST_API_BASE:-http://localhost:8080}"
 admin_token="${BALLAST_ADMIN_TOKEN:-ballast-dev-admin-token}"
+internal_token="${BALLAST_INTERNAL_TOKEN:-ballast-dev-internal-token}"
 web_origin="${BALLAST_WEB_ORIGIN:-http://localhost:3000}"
 cookie_jar="$(mktemp)"
 response_file="$(mktemp)"
@@ -23,6 +24,10 @@ json_field() {
 
 json_len() {
   python3 -c 'import json,sys; print(len(json.load(sys.stdin)[sys.argv[1]]))' "$1"
+}
+
+first_session_id() {
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["sessions"][0]["session_id"])'
 }
 
 wait_for_status() {
@@ -80,9 +85,17 @@ curl -fsS -b "${cookie_jar}" \
 rule_count="$(curl -fsS -b "${cookie_jar}" "${api_base}/api/trigger-rules" | json_len trigger_rules)"
 (( rule_count >= 1 ))
 
+curl -fsS -b "${cookie_jar}" \
+  -H 'Content-Type: application/json' \
+  -d '{"plugin_id":"prometheus","name":"Prometheus MCP","command":"prometheus-mcp","args":["--stdio"],"env":{"PROM_URL":"http://prometheus:9090"},"is_active":true,"updated_by":"e2e"}' \
+  "${api_base}/api/mcp-plugins" >/dev/null
+
+mcp_count="$(curl -fsS -b "${cookie_jar}" "${api_base}/api/mcp-plugins" | json_len mcp_plugins)"
+(( mcp_count >= 1 ))
+
 session_json="$(curl -fsS -b "${cookie_jar}" \
   -H 'Content-Type: application/json' \
-  -d '{"title":"e2e CrashLoopBackOff triage","skill_ids":["k8s-debug"]}' \
+  -d '{"title":"e2e CrashLoopBackOff triage","skill_ids":["k8s-debug"],"mcp_plugin_ids":["prometheus"]}' \
   "${api_base}/api/sessions")"
 session_id="$(printf '%s' "${session_json}" | json_field session_id)"
 
@@ -95,6 +108,8 @@ sandbox_security="$(docker inspect -f \
 
 docker exec "ballast-sbx-${session_id}" \
   test -f /workspace/.opencode/skills/k8s-debug/SKILL.md
+docker exec "ballast-sbx-${session_id}" \
+  grep -q 'prometheus-mcp' /workspace/.opencode/mcp_config.json
 
 audit_before="$(docker compose exec -T postgres psql -U ballast -d ballast -Atc \
   "SELECT policy_decision || ':' || count(*) FROM ballast_audit_logs WHERE session_id='${session_id}' GROUP BY policy_decision ORDER BY policy_decision")"
@@ -125,5 +140,30 @@ audit_api_count="$(curl -fsS -b "${cookie_jar}" "${api_base}/api/sessions/${sess
 code="$(status_code -b "${cookie_jar}" -X POST \
   "${api_base}/api/sessions/${session_id}/approve")"
 [[ "${code}" == "409" ]]
+
+webhook_json="$(curl -fsS \
+  -H "Authorization: Bearer ${internal_token}" \
+  -H 'Content-Type: application/json' \
+  -d '{"receiver":"ballast","alerts":[{"labels":{"alertname":"K8sPodCrashLooping","severity":"critical"}}]}' \
+  "${api_base}/api/internal/triggers/webhook/prometheus_alertmanager")"
+webhook_session_id="$(printf '%s' "${webhook_json}" | first_session_id)"
+[[ -n "${webhook_session_id}" ]]
+
+wait_for_status "${webhook_session_id}" "SUSPENDED"
+webhook_session_json="$(curl -fsS -b "${cookie_jar}" "${api_base}/api/sessions/${webhook_session_id}")"
+[[ "$(printf '%s' "${webhook_session_json}" | json_field trigger_type)" == "WEBHOOK" ]]
+
+curl -fsS -b "${cookie_jar}" -X POST \
+  "${api_base}/api/sessions/${webhook_session_id}/approve" >/dev/null
+wait_for_status "${webhook_session_id}" "SUCCESS"
+
+deadline=$((SECONDS + 15))
+while docker ps -a --format '{{.Names}}' | grep -qx "ballast-sbx-${webhook_session_id}"; do
+  if (( SECONDS >= deadline )); then
+    echo "sandbox ballast-sbx-${webhook_session_id} was not removed" >&2
+    exit 1
+  fi
+  sleep 0.25
+done
 
 echo "Ballast e2e smoke passed for ${session_id}"

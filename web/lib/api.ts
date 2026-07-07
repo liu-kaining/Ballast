@@ -35,6 +35,17 @@ export interface TriggerRule {
   policy_group: string;
 }
 
+export interface MCPPlugin {
+  plugin_id: string;
+  name: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  is_active: boolean;
+  updated_by: string;
+  updated_at?: string;
+}
+
 export interface AuditLog {
   audit_id: number;
   session_id: string;
@@ -96,13 +107,19 @@ export async function listSessions(
 export async function createSession(
   title: string,
   agentImage = "ballast-runner-base:dev",
-  skillIDs: string[] = []
+  skillIDs: string[] = [],
+  mcpPluginIDs: string[] = []
 ): Promise<Session> {
   const res = await fetch(`${API_BASE}/api/sessions`, {
     ...requestDefaults,
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title, agent_image: agentImage, skill_ids: skillIDs }),
+    body: JSON.stringify({
+      title,
+      agent_image: agentImage,
+      skill_ids: skillIDs,
+      mcp_plugin_ids: mcpPluginIDs,
+    }),
   });
   if (!res.ok) throw new APIError("createSession", res.status);
   return res.json();
@@ -171,6 +188,27 @@ export async function listTriggerRules(): Promise<TriggerRule[]> {
   if (!res.ok) throw new APIError("listTriggerRules", res.status);
   const body = await res.json();
   return body.trigger_rules ?? [];
+}
+
+export async function listMCPPlugins(): Promise<MCPPlugin[]> {
+  const res = await fetch(`${API_BASE}/api/mcp-plugins`, {
+    ...requestDefaults,
+    cache: "no-store",
+  });
+  if (!res.ok) throw new APIError("listMCPPlugins", res.status);
+  const body = await res.json();
+  return body.mcp_plugins ?? [];
+}
+
+export async function upsertMCPPlugin(plugin: MCPPlugin): Promise<MCPPlugin> {
+  const res = await fetch(`${API_BASE}/api/mcp-plugins`, {
+    ...requestDefaults,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(plugin),
+  });
+  if (!res.ok) throw new APIError("upsertMCPPlugin", res.status);
+  return res.json();
 }
 
 export async function upsertTriggerRule(rule: TriggerRule): Promise<TriggerRule> {

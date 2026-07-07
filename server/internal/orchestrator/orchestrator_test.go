@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -98,6 +99,17 @@ func (m memorySkills) Get(_ context.Context, id string) (*domain.Skill, error) {
 		return nil, errors.New("not found")
 	}
 	cloned := *skill
+	return &cloned, nil
+}
+
+type memoryMCPPlugins map[string]*domain.MCPPlugin
+
+func (m memoryMCPPlugins) Get(_ context.Context, id string) (*domain.MCPPlugin, error) {
+	plugin := m[id]
+	if plugin == nil {
+		return nil, errors.New("not found")
+	}
+	cloned := *plugin
 	return &cloned, nil
 }
 
@@ -195,6 +207,58 @@ func TestCreateSessionMaterializesSelectedSkills(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, session.SessionID)); !os.IsNotExist(err) {
 		t.Fatalf("session workspace was not cleaned up: %v", err)
+	}
+}
+
+func TestCreateSessionMaterializesMCPConfig(t *testing.T) {
+	sessions := newMemorySessions()
+	audit := &memoryAudit{}
+	sandbox := &fakeRuntime{}
+	root := t.TempDir()
+	manager := New(
+		sessions,
+		audit,
+		sandbox,
+		commandPolicy{},
+		"sandbox:test",
+		WithWorkspaceRoot(root),
+		WithMCPPluginRepository(memoryMCPPlugins{
+			"prometheus": {
+				PluginID: "prometheus",
+				Name:     "Prometheus MCP",
+				Command:  "prometheus-mcp",
+				Args:     []string{"--stdio"},
+				Env:      map[string]string{"PROM_URL": "http://prometheus:9090"},
+				IsActive: true,
+			},
+		}),
+	)
+
+	session, err := manager.CreateSessionWithOptions(context.Background(), CreateSessionOptions{
+		Title:        "with mcp",
+		MCPPluginIDs: []string{"prometheus"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sandbox.mu.Lock()
+	if len(sandbox.mounts) != 1 || len(sandbox.mounts[0].Extra) != 1 {
+		t.Fatalf("mounts = %#v", sandbox.mounts)
+	}
+	mcpMount := sandbox.mounts[0].Extra[0]
+	sandbox.mu.Unlock()
+	if mcpMount.Destination != "/workspace/.opencode/mcp_config.json" || !mcpMount.ReadOnly {
+		t.Fatalf("mcp mount = %#v", mcpMount)
+	}
+	content, err := os.ReadFile(mcpMount.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "prometheus-mcp") {
+		t.Fatalf("mcp config content = %s", string(content))
+	}
+	if err := manager.Destroy(context.Background(), session.SessionID); err != nil {
+		t.Fatal(err)
 	}
 }
 
