@@ -53,7 +53,7 @@ decision = "DENY" {
 	denied_kubectl_resources[input.args[_]]
 }
 
-safe_kubectl_verbs = {"get", "logs", "describe", "top"}
+safe_kubectl_verbs = {"get", "logs", "describe", "top", "wait"}
 safe_git_verbs = {"status", "diff", "log"}
 safe_terraform_verbs = {"plan", "validate"}
 safe_standalone_commands = {"ls", "cat", "grep", "awk"}

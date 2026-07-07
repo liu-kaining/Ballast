@@ -292,7 +292,12 @@ function toTerminalLines(events: EventEnvelope[]): string[] {
   for (const ev of events) {
     switch (ev.type) {
       case "server.connected":
-        lines.push("\x1b[36m[connected] mock-opencode v0.1\x1b[0m");
+        {
+          const p = ev.data || {};
+          const server = typeof p.server === "string" ? p.server : "runner";
+          const version = typeof p.version === "string" ? ` v${p.version}` : "";
+          lines.push(`\x1b[36m[connected] ${server}${version}\x1b[0m`);
+        }
         break;
       case "reason.step": {
         const p = ev.data || {};

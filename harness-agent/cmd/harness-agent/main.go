@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -24,6 +25,7 @@ func main() {
 	sessionID := flag.String("session", os.Getenv("BALLAST_SESSION_ID"), "session id")
 	child := flag.String("child", os.Getenv("BALLAST_CHILD"), "child process to wrap under PTY")
 	childArgs := flag.String("child-args", os.Getenv("BALLAST_CHILD_ARGS"), "comma-separated child args")
+	agentName := flag.String("agent-name", os.Getenv("BALLAST_AGENT_NAME"), "agent name reported to the control plane")
 	flag.Parse()
 
 	logger := log.New(os.Stdout, "[harness-agent] ", log.LstdFlags|log.Lshortfile)
@@ -31,6 +33,9 @@ func main() {
 
 	if *child == "" {
 		*child = "/usr/local/bin/mock-opencode"
+	}
+	if *agentName == "" {
+		*agentName = filepath.Base(*child)
 	}
 	if *reportURL == "" && *controlAddr != "" {
 		*reportURL = fmt.Sprintf("http://%s/api/internal/harness/report", *controlAddr)
@@ -48,7 +53,7 @@ func main() {
 		logger.Fatalf("--session is required")
 	}
 
-	reporter := guard.NewHTTPReporter(*reportURL, "mock-opencode", *internalToken)
+	reporter := guard.NewHTTPReporter(*reportURL, *agentName, *internalToken)
 	eventReporter := guard.NewHTTPEventReporter(*eventURL, *internalToken)
 
 	args := splitArgs(*childArgs)

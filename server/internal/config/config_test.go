@@ -21,6 +21,8 @@ func TestLoadAppliesEnvironmentOverrides(t *testing.T) {
 	t.Setenv("DATABASE_DSN", "postgres://db/override")
 	t.Setenv("BALLAST_POLICY_DIR", "/tmp/policies")
 	t.Setenv("BALLAST_CONTROL_PLANE_URL", "http://control:8080")
+	t.Setenv("BALLAST_RUNNER_COMMAND", "/usr/local/bin/ballast-real-k8s-runner")
+	t.Setenv("BALLAST_KUBECONFIG", "/tmp/ballast/real-k8s/kubeconfig.sandbox.yaml")
 
 	raw, err := os.ReadFile(filepath.Join("..", "..", "configs", "ballast.yaml"))
 	if err != nil {
@@ -43,6 +45,15 @@ func TestLoadAppliesEnvironmentOverrides(t *testing.T) {
 	}
 	if cfg.RuntimeProvider.Config.ControlPlaneURL != "http://control:8080" {
 		t.Fatalf("control plane URL = %q", cfg.RuntimeProvider.Config.ControlPlaneURL)
+	}
+	if cfg.RuntimeProvider.Config.RunnerCommand != "/usr/local/bin/ballast-real-k8s-runner" {
+		t.Fatalf("runner command = %q", cfg.RuntimeProvider.Config.RunnerCommand)
+	}
+	if cfg.RuntimeProvider.Config.KubeconfigPath != "/tmp/ballast/real-k8s/kubeconfig.sandbox.yaml" {
+		t.Fatalf("kubeconfig path = %q", cfg.RuntimeProvider.Config.KubeconfigPath)
+	}
+	if !cfg.RuntimeProvider.Config.RewriteLocalhostKubeconfig {
+		t.Fatal("rewrite localhost kubeconfig should default to true")
 	}
 }
 

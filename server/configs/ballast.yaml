@@ -16,6 +16,14 @@ runtime_provider:
     default_image: "ballast-runner-base:dev"
     workspace_root: "${BALLAST_WORKSPACE_ROOT:-/tmp/ballast/sandboxes}"
     control_plane_url: "${BALLAST_CONTROL_PLANE_URL:-http://host.docker.internal:8080}"
+    runner_command: "${BALLAST_RUNNER_COMMAND:-/usr/local/bin/mock-opencode}"
+    runner_args: "${BALLAST_RUNNER_ARGS:-}"
+    kubeconfig_path: "${BALLAST_KUBECONFIG:-}"
+    rewrite_localhost_kubeconfig: ${BALLAST_KUBECONFIG_REWRITE_LOCALHOST:-true}
+    kube_namespace: "${BALLAST_KUBE_NAMESPACE:-ballast-demo}"
+    kube_target_selector: "${BALLAST_KUBE_TARGET_SELECTOR:-app=crashloop-demo}"
+    kube_target_deployment: "${BALLAST_KUBE_TARGET_DEPLOYMENT:-crashloop-demo}"
+    kube_fix_configmap: "${BALLAST_KUBE_FIX_CONFIGMAP:-crashloop-demo-config}"
 
 credential_center:
   provider: "hashicorp_vault"  # 本地默认不注入凭证；生产需配置真实 Vault/JIT provider

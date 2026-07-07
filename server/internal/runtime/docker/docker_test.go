@@ -3,6 +3,8 @@ package docker
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -60,11 +62,69 @@ func TestCreateBuildsHardenedContainerCommand(t *testing.T) {
 		"--security-opt no-new-privileges",
 		"BALLAST_SESSION_ID=sess-123",
 		"BALLAST_INTERNAL_TOKEN=internal-secret",
+		"BALLAST_CHILD=/usr/local/bin/mock-opencode",
 		"ballast-runner-base:test",
 	} {
 		if !strings.Contains(command, required) {
 			t.Fatalf("docker run command missing %q: %s", required, command)
 		}
+	}
+}
+
+func TestCreateMountsRewrittenKubeconfig(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "kubeconfig.yaml")
+	if err := os.WriteFile(source, []byte("server: https://127.0.0.1:6445\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{}
+	r := &DockerRuntime{
+		config: Config{
+			MaxCPUCores:                2,
+			MaxMemoryMB:                512,
+			DefaultImage:               "ballast-runner-base:test",
+			WorkspaceRoot:              root,
+			ControlPlaneURL:            "http://host.docker.internal:8080",
+			InternalToken:              "internal-secret",
+			RunnerCommand:              "/usr/local/bin/ballast-real-k8s-runner",
+			KubeconfigPath:             source,
+			RewriteLocalhostKubeconfig: true,
+			KubeNamespace:              "ballast-demo",
+			KubeTargetSelector:         "app=crashloop-demo",
+			KubeTargetDeployment:       "crashloop-demo",
+			KubeFixConfigMap:           "crashloop-demo-config",
+			DockerBinary:               "docker",
+		},
+		runner: runner,
+	}
+
+	if _, err := r.Create(context.Background(), "sess-kube", "", runtime.Mounts{}); err != nil {
+		t.Fatal(err)
+	}
+	command := strings.Join(runner.calls[0].args, " ")
+	for _, required := range []string{
+		"BALLAST_CHILD=/usr/local/bin/ballast-real-k8s-runner",
+		"KUBECONFIG=/workspace/.kube/config",
+		"BALLAST_TARGET_NAMESPACE=ballast-demo",
+		"dst=/workspace/.kube/config,readonly",
+	} {
+		if !strings.Contains(command, required) {
+			t.Fatalf("docker run command missing %q: %s", required, command)
+		}
+	}
+	rewritten := filepath.Join(root, "sess-kube", "runtime", "kubeconfig.yaml")
+	content, err := os.ReadFile(rewritten)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "https://host.docker.internal:6445") {
+		t.Fatalf("kubeconfig was not rewritten: %s", string(content))
+	}
+	if err := r.Destroy(context.Background(), "sess-kube"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(rewritten); !os.IsNotExist(err) {
+		t.Fatalf("runtime kubeconfig was not cleaned up: %v", err)
 	}
 }
 

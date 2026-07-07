@@ -1,7 +1,7 @@
 # Ballast — local development orchestration
 # v0.1 scope: control plane skeleton + harness-agent + sandbox image + web
 
-.PHONY: all backend frontend harness sandbox-image dev test e2e-test clean fmt vet
+.PHONY: all backend frontend harness sandbox-image dev test e2e-test real-k8s-demo real-k8s-status real-k8s-stop clean fmt vet
 
 SHELL := /bin/bash
 ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
@@ -53,6 +53,15 @@ test: backend-test harness-test
 
 e2e-test:
 	./scripts/e2e-smoke.sh
+
+real-k8s-demo:
+	./scripts/real-k8s-demo.sh start
+
+real-k8s-status:
+	./scripts/real-k8s-demo.sh status
+
+real-k8s-stop:
+	./scripts/real-k8s-demo.sh stop
 
 fmt:
 	cd server && $(GO) fmt ./...

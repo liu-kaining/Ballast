@@ -17,6 +17,7 @@
 ## v0.2 — 真实引擎接入与自动化
 
 - [x] **OpenCode HTTP/SSE client adapter**：`server/internal/opencode/client.HTTPEngine` 支持 session / prompt / event / MCP 注入；沙箱镜像安装真实 CLI 后可替换 mock-opencode
+- [x] **真实 K8s 场景 runner**：`ballast-real-k8s-runner` 使用真实 kubectl + 只读 kubeconfig 访问真实 Kubernetes API，审批后执行 `kubectl apply` 并验证 rollout
 - [ ] **gRPC 通信切换**：基于 `harness-agent/internal/proto/harness.proto` 生成 pb 代码，控制面 ↔ harness-agent 由 HTTP JSON 升级为 gRPC 双向流
 - [x] **Webhook / Cron 自动执行**：基于 `ballast_trigger_rules` 资产，内部 Webhook 与 Cron scheduler 可自动拉起沙箱
 - [ ] **Vault JIT 凭证真实对接**：`InjectJITCredential` 调用 HashiCorp Vault 申请 15 分钟临时 kubeconfig，注入沙箱

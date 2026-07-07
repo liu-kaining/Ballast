@@ -35,11 +35,19 @@ type RuntimeProviderConfig struct {
 }
 
 type RuntimeConfig struct {
-	MaxCPUCores     int    `yaml:"max_cpu_cores"`
-	MaxMemoryMB     int    `yaml:"max_memory_mb"`
-	DefaultImage    string `yaml:"default_image"`
-	WorkspaceRoot   string `yaml:"workspace_root"`
-	ControlPlaneURL string `yaml:"control_plane_url"`
+	MaxCPUCores                int    `yaml:"max_cpu_cores"`
+	MaxMemoryMB                int    `yaml:"max_memory_mb"`
+	DefaultImage               string `yaml:"default_image"`
+	WorkspaceRoot              string `yaml:"workspace_root"`
+	ControlPlaneURL            string `yaml:"control_plane_url"`
+	RunnerCommand              string `yaml:"runner_command"`
+	RunnerArgs                 string `yaml:"runner_args"`
+	KubeconfigPath             string `yaml:"kubeconfig_path"`
+	RewriteLocalhostKubeconfig bool   `yaml:"rewrite_localhost_kubeconfig"`
+	KubeNamespace              string `yaml:"kube_namespace"`
+	KubeTargetSelector         string `yaml:"kube_target_selector"`
+	KubeTargetDeployment       string `yaml:"kube_target_deployment"`
+	KubeFixConfigMap           string `yaml:"kube_fix_configmap"`
 }
 
 type CredentialCenterConfig struct {

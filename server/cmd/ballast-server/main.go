@@ -58,12 +58,20 @@ func main() {
 	// 隔离执行面（Docker CLI + disposable sandbox）
 	runtimeCfg := cfg.RuntimeProvider.Config
 	sandboxRuntime, err := dockerruntime.New(context.Background(), dockerruntime.Config{
-		MaxCPUCores:     runtimeCfg.MaxCPUCores,
-		MaxMemoryMB:     runtimeCfg.MaxMemoryMB,
-		DefaultImage:    runtimeCfg.DefaultImage,
-		WorkspaceRoot:   runtimeCfg.WorkspaceRoot,
-		ControlPlaneURL: runtimeCfg.ControlPlaneURL,
-		InternalToken:   cfg.Server.InternalToken,
+		MaxCPUCores:                runtimeCfg.MaxCPUCores,
+		MaxMemoryMB:                runtimeCfg.MaxMemoryMB,
+		DefaultImage:               runtimeCfg.DefaultImage,
+		WorkspaceRoot:              runtimeCfg.WorkspaceRoot,
+		ControlPlaneURL:            runtimeCfg.ControlPlaneURL,
+		InternalToken:              cfg.Server.InternalToken,
+		RunnerCommand:              runtimeCfg.RunnerCommand,
+		RunnerArgs:                 runtimeCfg.RunnerArgs,
+		KubeconfigPath:             runtimeCfg.KubeconfigPath,
+		RewriteLocalhostKubeconfig: runtimeCfg.RewriteLocalhostKubeconfig,
+		KubeNamespace:              runtimeCfg.KubeNamespace,
+		KubeTargetSelector:         runtimeCfg.KubeTargetSelector,
+		KubeTargetDeployment:       runtimeCfg.KubeTargetDeployment,
+		KubeFixConfigMap:           runtimeCfg.KubeFixConfigMap,
 	})
 	if err != nil {
 		logger.Fatalf("initialize sandbox runtime: %v", err)
