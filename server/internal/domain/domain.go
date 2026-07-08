@@ -98,3 +98,12 @@ type AuditLog struct {
 	RawTTYOutputPath string         `json:"raw_tty_output_path"`
 	CreatedAt        time.Time      `json:"created_at"`
 }
+
+// SessionEvent 持久化 WebSocket 事件流，用于历史会话的 Reason Tree / TTY 回放。
+type SessionEvent struct {
+	EventID   int64           `json:"event_id"`
+	SessionID string          `json:"session_id"`
+	EventType string          `json:"type"`
+	EventData json.RawMessage `json:"data"`
+	CreatedAt time.Time       `json:"created_at"`
+}

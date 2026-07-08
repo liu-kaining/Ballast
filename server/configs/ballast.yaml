@@ -30,6 +30,11 @@ credential_center:
   endpoint: "https://vault.internal.com:8200"
   auth_token_env: "VAULT_TOKEN"
 
+notifications:
+  approval_webhook_url: "${BALLAST_APPROVAL_WEBHOOK_URL:-}"
+  approval_webhook_kind: "${BALLAST_APPROVAL_WEBHOOK_KIND:-generic}" # generic, feishu/lark, dingtalk
+  console_base_url: "${BALLAST_CONSOLE_BASE_URL:-http://localhost:3300}"
+
 model_router:
   default_provider: "deepseek"
   providers:

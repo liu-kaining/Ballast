@@ -21,14 +21,14 @@
 - [ ] **gRPC 通信切换**：基于 `harness-agent/internal/proto/harness.proto` 生成 pb 代码，控制面 ↔ harness-agent 由 HTTP JSON 升级为 gRPC 双向流
 - [x] **Webhook / Cron 自动执行**：基于 `ballast_trigger_rules` 资产，内部 Webhook 与 Cron scheduler 可自动拉起沙箱
 - [ ] **Vault JIT 凭证真实对接**：`InjectJITCredential` 调用 HashiCorp Vault 申请 15 分钟临时 kubeconfig，注入沙箱
-- [ ] **飞书/钉钉审批卡片推送**：SUSPEND 时向值班 SRE 推送带 Approve 按钮的卡片
-- [ ] **Web-TTY 双向接管**：前端【接管终端】按钮，AI 停止 → 人工手敲 → 【释放接管】AI 承接现场
+- [x] **飞书/钉钉审批卡片推送**：SUSPEND 时可通过 `generic/feishu/dingtalk` webhook 向值班 SRE 推送审批通知
+- [x] **Web-TTY 双向接管**：工作区支持人工接管命令在当前沙箱执行，命令仍经 OPA 判定并进入审计/事件回放
 
 ## v0.3 — 资产中枢与生态
 
-- [ ] **Skill IDE**：在现有 Skill API 基础上提供完整编辑器、版本 diff、校验与发布流
+- [x] **Skill IDE**：资产中心提供 Skill Markdown、Trigger Rule JSON、MCP Plugin JSON 编辑与发布
 - [x] **MCP 插件中心基础能力**：注册 MCP server，任务拉起时生成 `mcp_config.json` 并只读挂载进沙箱；真实 OpenCode 下可通过 client `POST /mcp` 注入
-- [ ] **审计录像回放**：`ballast_audit_logs.raw_tty_output_path` 指向对象存储的原始流，前端时间轴回放
+- [x] **审计事件回放**：`ballast_session_events` 持久化 Reason/TTY/Policy 事件，历史会话可回放；对象存储原始录像仍可作为生产增强
 - [ ] **Git PR 自动提交**：场景 B 演进态，沙箱内 git 提交分支并向 GitLab 推送 PR
 
 ## v0.4 — 执行面强化

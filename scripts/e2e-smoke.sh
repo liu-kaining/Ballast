@@ -101,6 +101,15 @@ session_id="$(printf '%s' "${session_json}" | json_field session_id)"
 
 wait_for_status "${session_id}" "SUSPENDED"
 
+event_count="$(curl -fsS -b "${cookie_jar}" "${api_base}/api/sessions/${session_id}/events" | json_len events)"
+(( event_count >= 5 ))
+
+manual_json="$(curl -fsS -b "${cookie_jar}" \
+  -H 'Content-Type: application/json' \
+  -d '{"command":"ls /workspace","approver":"e2e-manual"}' \
+  "${api_base}/api/sessions/${session_id}/terminal/exec")"
+[[ "$(printf '%s' "${manual_json}" | json_field policy_decision)" == "APPROVE" ]]
+
 sandbox_security="$(docker inspect -f \
   '{{.Config.User}}|{{.HostConfig.ReadonlyRootfs}}|{{json .HostConfig.CapDrop}}|{{json .HostConfig.SecurityOpt}}' \
   "ballast-sbx-${session_id}")"
@@ -113,7 +122,7 @@ docker exec "ballast-sbx-${session_id}" \
 
 audit_before="$(docker compose exec -T postgres psql -U ballast -d ballast -Atc \
   "SELECT policy_decision || ':' || count(*) FROM ballast_audit_logs WHERE session_id='${session_id}' GROUP BY policy_decision ORDER BY policy_decision")"
-grep -qx 'APPROVE:2' <<<"${audit_before}"
+grep -qx 'APPROVE:3' <<<"${audit_before}"
 grep -qx 'SUSPEND:1' <<<"${audit_before}"
 
 curl -fsS -b "${cookie_jar}" -X POST \
@@ -131,11 +140,11 @@ done
 
 audit_after="$(docker compose exec -T postgres psql -U ballast -d ballast -Atc \
   "SELECT policy_decision || ':' || count(*) FROM ballast_audit_logs WHERE session_id='${session_id}' GROUP BY policy_decision ORDER BY policy_decision")"
-grep -qx 'APPROVE:3' <<<"${audit_after}"
+grep -qx 'APPROVE:4' <<<"${audit_after}"
 grep -qx 'SUSPEND:1' <<<"${audit_after}"
 
 audit_api_count="$(curl -fsS -b "${cookie_jar}" "${api_base}/api/sessions/${session_id}/audit" | json_len audit_logs)"
-[[ "${audit_api_count}" == "4" ]]
+[[ "${audit_api_count}" == "5" ]]
 
 code="$(status_code -b "${cookie_jar}" -X POST \
   "${api_base}/api/sessions/${session_id}/approve")"

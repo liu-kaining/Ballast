@@ -205,6 +205,7 @@ export default function SessionsPage() {
       >
         <h1 style={{ fontSize: 24, margin: 0 }}>会话列表</h1>
         <div style={{ display: "flex", gap: 8 }}>
+          {!authRequired && <Link href="/assets" style={btnStyle()}>资产中心</Link>}
           {!authRequired && <button onClick={handleLogout} style={btnStyle()}>退出</button>}
           <button onClick={refresh} style={btnStyle()} disabled={loading}>刷新</button>
         </div>

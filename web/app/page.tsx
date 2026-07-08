@@ -19,11 +19,22 @@ export default function HomePage() {
         >
           进入自主运维工作区 →
         </Link>
+        <Link
+          href="/assets"
+          style={{
+            padding: "12px 20px",
+            background: "var(--panel)",
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+          }}
+        >
+          管理资产与扩展 →
+        </Link>
       </nav>
 
       <section style={{ marginTop: 48, color: "var(--muted)", fontSize: 14, lineHeight: 1.8 }}>
-        <p>当前范围：控制面 + Docker 沙箱 + Harness-Agent + OPA 审批 + Skill/MCP 资产挂载 + Webhook/Cron 自动触发。</p>
-        <p>真实 OpenCode CLI、真实 Vault、Web-TTY 双向接管和 Git PR 自动提交保持可插拔扩展。</p>
+        <p>当前范围：控制面 + Docker 沙箱 + Harness-Agent + OPA 审批 + Skill/MCP 资产挂载 + Webhook/Cron 自动触发 + 真实 K8s runner。</p>
+        <p>事件回放、人工接管和资产编辑已进入本地可运行闭环；外部 Vault/Git/IM 系统通过配置化 provider 接入。</p>
       </section>
     </main>
   );

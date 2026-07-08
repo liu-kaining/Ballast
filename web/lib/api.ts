@@ -60,6 +60,21 @@ export interface EventEnvelope {
   data: Record<string, string | number | boolean | null | undefined>;
 }
 
+export interface SessionEvent extends EventEnvelope {
+  event_id: number;
+  session_id: string;
+  created_at: string;
+}
+
+export interface ManualCommandResult {
+  command: string;
+  stdout: string;
+  stderr: string;
+  error?: string;
+  policy_decision: string;
+  approver: string;
+}
+
 export class APIError extends Error {
   status: number;
 
@@ -154,6 +169,24 @@ export async function destroySession(id: string) {
   return res.json();
 }
 
+export async function execManualCommand(
+  id: string,
+  command: string,
+  approver = "manual-takeover"
+): Promise<ManualCommandResult> {
+  const res = await fetch(`${API_BASE}/api/sessions/${id}/terminal/exec`, {
+    ...requestDefaults,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ command, approver }),
+  });
+  if (!res.ok) {
+    if (res.status === 409) return res.json();
+    throw new APIError("execManualCommand", res.status);
+  }
+  return res.json();
+}
+
 export function sessionWSURL(id: string): string {
   const base = API_BASE.replace(/^http/, "ws");
   return `${base}/api/sessions/${id}/ws`;
@@ -230,6 +263,16 @@ export async function listAuditLogs(id: string, limit = 100): Promise<AuditLog[]
   if (!res.ok) throw new APIError("listAuditLogs", res.status);
   const body = await res.json();
   return body.audit_logs ?? [];
+}
+
+export async function listSessionEvents(id: string, limit = 1000): Promise<SessionEvent[]> {
+  const res = await fetch(`${API_BASE}/api/sessions/${id}/events?limit=${limit}`, {
+    ...requestDefaults,
+    cache: "no-store",
+  });
+  if (!res.ok) throw new APIError("listSessionEvents", res.status);
+  const body = await res.json();
+  return body.events ?? [];
 }
 
 export function errorMessage(error: unknown): string {

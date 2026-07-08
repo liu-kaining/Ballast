@@ -253,6 +253,10 @@ func (r *Router) handleSessionItem(w http.ResponseWriter, req *http.Request) {
 		r.approveSession(w, req, id)
 	case rest == "audit" && req.Method == http.MethodGet:
 		r.listAudit(w, req, id)
+	case rest == "events" && req.Method == http.MethodGet:
+		r.listEvents(w, req, id)
+	case rest == "terminal/exec" && req.Method == http.MethodPost:
+		r.execManualCommand(w, req, id)
 	case rest == "destroy" && req.Method == http.MethodPost:
 		r.destroySession(w, req, id)
 	case rest == "ws" && req.Method == http.MethodGet:
@@ -325,6 +329,31 @@ func (r *Router) listAudit(w http.ResponseWriter, req *http.Request, id string) 
 	writeJSON(w, http.StatusOK, map[string]any{"audit_logs": logs})
 }
 
+func (r *Router) listEvents(w http.ResponseWriter, req *http.Request, id string) {
+	if _, err := r.manager.GetSession(req.Context(), id); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, err)
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	limit, err := parseNonNegativeInt(req.URL.Query().Get("limit"), 500)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid limit"))
+		return
+	}
+	events, err := r.manager.ListEvents(req.Context(), id, limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if events == nil {
+		events = []*domain.SessionEvent{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": events})
+}
+
 func (r *Router) destroySession(w http.ResponseWriter, req *http.Request, id string) {
 	if err := r.manager.Destroy(req.Context(), id); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -335,6 +364,54 @@ func (r *Router) destroySession(w http.ResponseWriter, req *http.Request, id str
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "destroyed"})
+}
+
+func (r *Router) execManualCommand(w http.ResponseWriter, req *http.Request, id string) {
+	var body struct {
+		Command  string   `json:"command"`
+		Argv     []string `json:"argv"`
+		Approver string   `json:"approver"`
+	}
+	if err := decodeJSON(w, req, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	argv := cleanStringList(body.Argv, 128)
+	if len(argv) == 0 && strings.TrimSpace(body.Command) != "" {
+		argv = strings.Fields(body.Command)
+	}
+	if len(argv) == 0 {
+		writeErr(w, http.StatusBadRequest, errors.New("command or argv is required"))
+		return
+	}
+	if len(argv) > 32 {
+		writeErr(w, http.StatusBadRequest, errors.New("argv exceeds 32 items"))
+		return
+	}
+	for _, item := range argv {
+		if len([]rune(item)) > 512 {
+			writeErr(w, http.StatusBadRequest, errors.New("argv item exceeds 512 characters"))
+			return
+		}
+	}
+	approver := strings.TrimSpace(body.Approver)
+	if approver == "" {
+		approver = "manual-takeover"
+	}
+	if len([]rune(approver)) > 64 {
+		writeErr(w, http.StatusBadRequest, errors.New("approver exceeds 64 characters"))
+		return
+	}
+	result, err := r.manager.ExecuteManualCommand(req.Context(), id, argv, approver)
+	if err != nil {
+		if strings.Contains(err.Error(), "blocked by policy") {
+			writeJSON(w, http.StatusConflict, result)
+			return
+		}
+		writeErr(w, http.StatusConflict, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (r *Router) serveWS(w http.ResponseWriter, req *http.Request, id string) {

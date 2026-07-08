@@ -91,6 +91,36 @@ func (m *memoryAudit) ListBySession(_ context.Context, id string, limit int) ([]
 	return out, nil
 }
 
+type memoryEvents struct {
+	mu     sync.Mutex
+	events []*domain.SessionEvent
+}
+
+func (m *memoryEvents) Append(_ context.Context, event *domain.SessionEvent) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cloned := *event
+	cloned.EventID = int64(len(m.events) + 1)
+	m.events = append(m.events, &cloned)
+	return cloned.EventID, nil
+}
+
+func (m *memoryEvents) ListBySession(_ context.Context, id string, limit int) ([]*domain.SessionEvent, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []*domain.SessionEvent
+	for _, event := range m.events {
+		if event.SessionID == id {
+			cloned := *event
+			out = append(out, &cloned)
+			if limit > 0 && len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
 type memorySkills map[string]*domain.Skill
 
 func (m memorySkills) Get(_ context.Context, id string) (*domain.Skill, error) {
@@ -140,7 +170,7 @@ type fakeInstance struct{ id string }
 func (f fakeInstance) GetID() string { return f.id }
 func (f fakeInstance) GetIP() string { return "127.0.0.2" }
 func (f fakeInstance) ExecuteCommand(context.Context, []string) ([]byte, []byte, error) {
-	return nil, nil, nil
+	return []byte("manual stdout"), nil, nil
 }
 
 type commandPolicy struct{}
@@ -333,6 +363,65 @@ func TestHubReplaysEventsPublishedBeforeSubscription(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("history was not replayed")
+	}
+}
+
+func TestSessionEventsArePersistedForReplay(t *testing.T) {
+	sessions := newMemorySessions()
+	audit := &memoryAudit{}
+	events := &memoryEvents{}
+	sandbox := &fakeRuntime{}
+	manager := New(
+		sessions,
+		audit,
+		sandbox,
+		commandPolicy{},
+		"sandbox:test",
+		WithEventRepository(events),
+	)
+	session, err := manager.CreateSession(context.Background(), "event replay", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.HandleHarnessEvent(context.Background(), session.SessionID, "reason.step", mustJSON(map[string]any{
+		"index": 1,
+		"title": "Inspect",
+	})); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := manager.ListEvents(context.Background(), session.SessionID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted) != 2 || persisted[0].EventType != "session.started" || persisted[1].EventType != "reason.step" {
+		t.Fatalf("persisted events = %#v", persisted)
+	}
+}
+
+func TestManualTakeoverExecutesAndAuditsPolicy(t *testing.T) {
+	manager, _, audit, _ := newTestManager()
+	session, err := manager.CreateSession(context.Background(), "manual", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.ExecuteManualCommand(context.Background(), session.SessionID, []string{"kubectl", "get", "pods"}, "operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Stdout != "manual stdout" || result.PolicyDecision != domain.DecisionApprove {
+		t.Fatalf("manual result = %#v", result)
+	}
+	_, err = manager.ExecuteManualCommand(context.Background(), session.SessionID, []string{"rm", "-rf", "/"}, "operator")
+	if err == nil {
+		t.Fatal("expected denied manual command")
+	}
+	audit.mu.Lock()
+	defer audit.mu.Unlock()
+	if len(audit.logs) != 2 {
+		t.Fatalf("audit logs = %#v", audit.logs)
+	}
+	if audit.logs[0].ExecutedCommand != "kubectl get pods" || audit.logs[1].PolicyDecision != domain.DecisionDeny {
+		t.Fatalf("audit logs = %#v", audit.logs)
 	}
 }
 

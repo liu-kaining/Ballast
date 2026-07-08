@@ -14,6 +14,7 @@ import (
 	"github.com/ballast/ballast-server/internal/api"
 	"github.com/ballast/ballast-server/internal/automation"
 	"github.com/ballast/ballast-server/internal/config"
+	"github.com/ballast/ballast-server/internal/notify"
 	"github.com/ballast/ballast-server/internal/orchestrator"
 	"github.com/ballast/ballast-server/internal/policy/opa"
 	dockerruntime "github.com/ballast/ballast-server/internal/runtime/docker"
@@ -87,6 +88,11 @@ func main() {
 		runtimeCfg.DefaultImage,
 		orchestrator.WithSkillRepository(dbStore.Skills),
 		orchestrator.WithMCPPluginRepository(dbStore.MCPPlugins),
+		orchestrator.WithEventRepository(dbStore.Events),
+		orchestrator.WithNotifier(
+			notify.NewWebhook(cfg.Notifications.ApprovalWebhookURL, cfg.Notifications.ApprovalWebhookKind),
+			cfg.Notifications.ConsoleBaseURL,
+		),
 		orchestrator.WithWorkspaceRoot(runtimeCfg.WorkspaceRoot),
 	)
 

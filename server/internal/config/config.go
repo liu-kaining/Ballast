@@ -14,6 +14,7 @@ type Config struct {
 	Server           ServerConfig           `yaml:"server"`
 	RuntimeProvider  RuntimeProviderConfig  `yaml:"runtime_provider"`
 	CredentialCenter CredentialCenterConfig `yaml:"credential_center"`
+	Notifications    NotificationConfig     `yaml:"notifications"`
 	ModelRouter      ModelRouterConfig      `yaml:"model_router"`
 	Database         DatabaseConfig         `yaml:"database"`
 	Policy           PolicyConfig           `yaml:"policy"`
@@ -54,6 +55,12 @@ type CredentialCenterConfig struct {
 	Provider     string `yaml:"provider"`
 	Endpoint     string `yaml:"endpoint"`
 	AuthTokenEnv string `yaml:"auth_token_env"`
+}
+
+type NotificationConfig struct {
+	ApprovalWebhookURL  string `yaml:"approval_webhook_url"`
+	ApprovalWebhookKind string `yaml:"approval_webhook_kind"`
+	ConsoleBaseURL      string `yaml:"console_base_url"`
 }
 
 type ModelRouterConfig struct {

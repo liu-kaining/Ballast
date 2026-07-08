@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ballast/ballast-server/internal/domain"
+	"github.com/ballast/ballast-server/internal/notify"
 	"github.com/ballast/ballast-server/internal/policy"
 	"github.com/ballast/ballast-server/internal/runtime"
 )
@@ -30,6 +31,11 @@ type AuditRepository interface {
 	ListBySession(context.Context, string, int) ([]*domain.AuditLog, error)
 }
 
+type EventRepository interface {
+	Append(context.Context, *domain.SessionEvent) (int64, error)
+	ListBySession(context.Context, string, int) ([]*domain.SessionEvent, error)
+}
+
 type SkillRepository interface {
 	Get(context.Context, string) (*domain.Skill, error)
 }
@@ -39,15 +45,18 @@ type MCPPluginRepository interface {
 }
 
 type Manager struct {
-	sessionsRepo  SessionRepository
-	auditRepo     AuditRepository
-	skillsRepo    SkillRepository
-	mcpRepo       MCPPluginRepository
-	runtime       runtime.SandboxRuntime
-	policy        policy.PolicyEngine
-	defaultImage  string
-	workspaceRoot string
-	hub           *Hub
+	sessionsRepo   SessionRepository
+	auditRepo      AuditRepository
+	eventRepo      EventRepository
+	skillsRepo     SkillRepository
+	mcpRepo        MCPPluginRepository
+	runtime        runtime.SandboxRuntime
+	policy         policy.PolicyEngine
+	notifier       notify.Notifier
+	consoleBaseURL string
+	defaultImage   string
+	workspaceRoot  string
+	hub            *Hub
 
 	mu       sync.RWMutex
 	sessions map[string]*liveSession
@@ -82,9 +91,22 @@ func WithSkillRepository(repo SkillRepository) Option {
 	}
 }
 
+func WithEventRepository(repo EventRepository) Option {
+	return func(m *Manager) {
+		m.eventRepo = repo
+	}
+}
+
 func WithMCPPluginRepository(repo MCPPluginRepository) Option {
 	return func(m *Manager) {
 		m.mcpRepo = repo
+	}
+}
+
+func WithNotifier(notifier notify.Notifier, consoleBaseURL string) Option {
+	return func(m *Manager) {
+		m.notifier = notifier
+		m.consoleBaseURL = strings.TrimRight(strings.TrimSpace(consoleBaseURL), "/")
 	}
 }
 
@@ -100,6 +122,15 @@ type CreateSessionOptions struct {
 	TriggerType  domain.TriggerType
 	SkillIDs     []string
 	MCPPluginIDs []string
+}
+
+type ManualCommandResult struct {
+	Command        string                `json:"command"`
+	Stdout         string                `json:"stdout"`
+	Stderr         string                `json:"stderr"`
+	Error          string                `json:"error,omitempty"`
+	PolicyDecision domain.PolicyDecision `json:"policy_decision"`
+	Approver       string                `json:"approver"`
 }
 
 func New(
@@ -189,7 +220,7 @@ func (m *Manager) CreateSessionWithOptions(ctx context.Context, opts CreateSessi
 	live.instance = instance
 	live.mu.Unlock()
 
-	m.hub.Broadcast(session.SessionID, EventEnvelope{
+	m.publishEvent(context.Background(), session.SessionID, EventEnvelope{
 		Type: "session.started",
 		Data: mustJSON(map[string]string{
 			"session_id": session.SessionID,
@@ -222,6 +253,19 @@ func (m *Manager) ListAudit(ctx context.Context, id string, limit int) ([]*domai
 	return m.auditRepo.ListBySession(ctx, id, limit)
 }
 
+func (m *Manager) ListEvents(ctx context.Context, id string, limit int) ([]*domain.SessionEvent, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	if limit > 2000 {
+		limit = 2000
+	}
+	if m.eventRepo == nil {
+		return nil, nil
+	}
+	return m.eventRepo.ListBySession(ctx, id, limit)
+}
+
 // HandleHarnessEvent forwards a trusted sandbox event and completes the
 // session after the controlled child emits message.completed.
 func (m *Manager) HandleHarnessEvent(ctx context.Context, id, eventType string, data json.RawMessage) error {
@@ -238,7 +282,7 @@ func (m *Manager) HandleHarnessEvent(ctx context.Context, id, eventType string, 
 		return fmt.Errorf("unsupported event type %q", eventType)
 	}
 
-	m.hub.Broadcast(id, EventEnvelope{Type: eventType, Data: data})
+	m.publishEvent(ctx, id, EventEnvelope{Type: eventType, Data: data})
 	terminalFailure := eventType == "error"
 	if eventType == "tool.result" {
 		var result struct {
@@ -260,7 +304,7 @@ func (m *Manager) HandleHarnessEvent(ctx context.Context, id, eventType string, 
 		if err := m.setStatus(ctx, live, domain.SessionSuccess); err != nil {
 			return err
 		}
-		m.hub.Broadcast(id, EventEnvelope{
+		m.publishEvent(ctx, id, EventEnvelope{
 			Type: "session.completed",
 			Data: mustJSON(map[string]string{"status": string(domain.SessionSuccess)}),
 		})
@@ -307,7 +351,7 @@ func (m *Manager) EvaluateCommand(ctx context.Context, command policy.CommandCon
 		return policy.Deny, fmt.Errorf("write policy audit: %w", err)
 	}
 
-	m.hub.Broadcast(command.SessionID, EventEnvelope{
+	m.publishEvent(context.Background(), command.SessionID, EventEnvelope{
 		Type: "policy.decision",
 		Data: mustJSON(map[string]any{
 			"audit_id": auditID,
@@ -347,6 +391,7 @@ func (m *Manager) waitForApproval(ctx context.Context, live *liveSession, comman
 		m.clearPending(live, pending)
 		return policy.Deny, err
 	}
+	m.notifyApprovalRequired(live, pending.command)
 
 	select {
 	case result := <-pending.result:
@@ -366,7 +411,7 @@ func (m *Manager) waitForApproval(ctx context.Context, live *liveSession, comman
 			pending.done <- auditErr
 			return policy.Deny, auditErr
 		}
-		m.hub.Broadcast(command.SessionID, EventEnvelope{
+		m.publishEvent(context.Background(), command.SessionID, EventEnvelope{
 			Type: "policy.resumed",
 			Data: mustJSON(map[string]string{
 				"approver": result.approver,
@@ -417,6 +462,97 @@ func (m *Manager) Approve(ctx context.Context, id, approver string) error {
 	}
 }
 
+func (m *Manager) ExecuteManualCommand(ctx context.Context, id string, argv []string, approver string) (ManualCommandResult, error) {
+	live := m.liveSession(id)
+	if live == nil {
+		return ManualCommandResult{}, fmt.Errorf("session %s is not active", id)
+	}
+	if len(argv) == 0 || strings.TrimSpace(argv[0]) == "" {
+		return ManualCommandResult{}, errors.New("command argv is required")
+	}
+	if approver = strings.TrimSpace(approver); approver == "" {
+		approver = "manual-takeover"
+	}
+	command := filepath.Base(strings.TrimSpace(argv[0]))
+	args := make([]string, 0, len(argv)-1)
+	for _, arg := range argv[1:] {
+		if arg = strings.TrimSpace(arg); arg != "" {
+			args = append(args, arg)
+		}
+	}
+	rawCommand := joinCommand(command, args)
+	cmdCtx := policy.CommandContext{
+		SessionID: id,
+		User:      approver,
+		AgentName: "manual-takeover",
+		Command:   command,
+		Args:      args,
+		Unsafe:    containsShellControl(rawCommand),
+	}
+	decision, err := m.policy.EvaluateCommand(ctx, cmdCtx)
+	if err != nil {
+		return ManualCommandResult{}, fmt.Errorf("evaluate manual command: %w", err)
+	}
+	if _, err := m.auditRepo.Append(ctx, &domain.AuditLog{
+		SessionID:       id,
+		LoopIndex:       1,
+		ModelName:       "manual-takeover",
+		ExecutedCommand: rawCommand,
+		PolicyDecision:  domain.PolicyDecision(decision),
+		Approver:        approver,
+	}); err != nil {
+		return ManualCommandResult{}, fmt.Errorf("write manual command audit: %w", err)
+	}
+	if decision == policy.Deny {
+		result := ManualCommandResult{
+			Command:        rawCommand,
+			PolicyDecision: domain.DecisionDeny,
+			Approver:       approver,
+			Error:          "blocked by Ballast policy",
+		}
+		m.publishEvent(context.Background(), id, EventEnvelope{
+			Type: "manual.command",
+			Data: mustJSON(result),
+		})
+		return result, errors.New("manual command blocked by policy")
+	}
+	if decision == policy.Suspend {
+		if _, err := m.auditRepo.Append(ctx, &domain.AuditLog{
+			SessionID:       id,
+			LoopIndex:       1,
+			ModelName:       "manual-takeover",
+			ExecutedCommand: rawCommand,
+			PolicyDecision:  domain.DecisionApprove,
+			Approver:        approver,
+		}); err != nil {
+			return ManualCommandResult{}, fmt.Errorf("write manual approval audit: %w", err)
+		}
+	}
+
+	live.mu.RLock()
+	instance := live.instance
+	live.mu.RUnlock()
+	if instance == nil {
+		return ManualCommandResult{}, errors.New("sandbox instance is not ready")
+	}
+	stdout, stderr, execErr := instance.ExecuteCommand(ctx, append([]string{command}, args...))
+	result := ManualCommandResult{
+		Command:        rawCommand,
+		Stdout:         truncateForEvent(string(stdout)),
+		Stderr:         truncateForEvent(string(stderr)),
+		PolicyDecision: domain.DecisionApprove,
+		Approver:       approver,
+	}
+	if execErr != nil {
+		result.Error = execErr.Error()
+	}
+	m.publishEvent(context.Background(), id, EventEnvelope{
+		Type: "manual.command",
+		Data: mustJSON(result),
+	})
+	return result, nil
+}
+
 func (m *Manager) Destroy(ctx context.Context, id string) error {
 	if m.liveSession(id) == nil {
 		if _, err := m.sessionsRepo.Get(ctx, id); err != nil {
@@ -447,7 +583,7 @@ func (m *Manager) finishSession(ctx context.Context, id string, userInitiated bo
 				return err
 			}
 		}
-		m.hub.Broadcast(id, EventEnvelope{
+		m.publishEvent(context.Background(), id, EventEnvelope{
 			Type: "session.destroyed",
 			Data: mustJSON(map[string]string{"status": string(status)}),
 		})
@@ -479,6 +615,41 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 type EventEnvelope struct {
 	Type string          `json:"type"`
 	Data json.RawMessage `json:"data"`
+}
+
+func (m *Manager) publishEvent(ctx context.Context, sessionID string, event EventEnvelope) {
+	if m.eventRepo != nil {
+		_, _ = m.eventRepo.Append(ctx, &domain.SessionEvent{
+			SessionID: sessionID,
+			EventType: event.Type,
+			EventData: event.Data,
+		})
+	}
+	m.hub.Broadcast(sessionID, event)
+}
+
+func (m *Manager) notifyApprovalRequired(live *liveSession, command string) {
+	if m.notifier == nil {
+		return
+	}
+	live.mu.RLock()
+	sessionID := live.session.SessionID
+	title := live.session.Title
+	live.mu.RUnlock()
+	consoleURL := ""
+	if m.consoleBaseURL != "" {
+		consoleURL = m.consoleBaseURL + "/sessions/" + sessionID
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = m.notifier.NotifyApprovalRequired(ctx, notify.ApprovalNotification{
+			SessionID:  sessionID,
+			Title:      title,
+			Command:    command,
+			ConsoleURL: consoleURL,
+		})
+	}()
 }
 
 func (m *Manager) Subscribe(sessionID string) <-chan EventEnvelope {
@@ -546,6 +717,14 @@ func containsShellControl(command string) bool {
 		}
 	}
 	return false
+}
+
+func truncateForEvent(value string) string {
+	const max = 32768
+	if len(value) <= max {
+		return value
+	}
+	return value[:max] + "\n...[truncated]"
 }
 
 func cloneSession(session *domain.Session) *domain.Session {

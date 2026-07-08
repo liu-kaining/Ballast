@@ -7,8 +7,10 @@ import ApproveBar from "@/components/ApproveBar";
 import {
   approveSession,
   destroySession,
+  execManualCommand,
   getSession,
   listAuditLogs,
+  listSessionEvents,
   sessionWSURL,
   errorMessage,
   type AuditLog,
@@ -33,6 +35,8 @@ export default function SessionWorkspacePage({
   const [pendingDecision, setPendingDecision] = useState<string | undefined>();
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [busy, setBusy] = useState(false);
+  const [manualCommand, setManualCommand] = useState("kubectl get pods -n ballast-demo");
+  const [manualBusy, setManualBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -70,6 +74,20 @@ export default function SessionWorkspacePage({
     refreshAudit();
   }, [refreshAudit]);
 
+  const refreshEvents = useCallback(async () => {
+    if (!id) return;
+    try {
+      const persisted = await listSessionEvents(id);
+      setEvents((prev) => mergeEvents(persisted, prev));
+    } catch (e: unknown) {
+      setError(errorMessage(e));
+    }
+  }, [id]);
+
+  useEffect(() => {
+    refreshEvents();
+  }, [refreshEvents]);
+
   // 订阅 WebSocket 事件流
   useEffect(() => {
     if (!id) return;
@@ -78,7 +96,7 @@ export default function SessionWorkspacePage({
     ws.onmessage = (msg) => {
       try {
         const env: EventEnvelope = JSON.parse(msg.data);
-        setEvents((prev) => [...prev, env]);
+        setEvents((prev) => mergeEvents(prev, [env]));
         if (env.type === "policy.decision" && env.data) {
           setPendingCommand(
             typeof env.data.command === "string" ? env.data.command : undefined
@@ -148,6 +166,35 @@ export default function SessionWorkspacePage({
     }
   }
 
+  async function handleManualExec() {
+    if (!id || !manualCommand.trim()) return;
+    setManualBusy(true);
+    setError(null);
+    try {
+      const result = await execManualCommand(id, manualCommand.trim());
+      setEvents((prev) =>
+        mergeEvents(prev, [
+          {
+            type: "manual.command",
+            data: {
+              command: result.command,
+              stdout: result.stdout,
+              stderr: result.stderr,
+              error: result.error,
+              policy_decision: result.policy_decision,
+              approver: result.approver,
+            },
+          },
+        ])
+      );
+      await refreshAudit();
+    } catch (e: unknown) {
+      setError(errorMessage(e));
+    } finally {
+      setManualBusy(false);
+    }
+  }
+
   if (!id) return <main style={{ padding: 24 }}>加载中...</main>;
 
   return (
@@ -189,8 +236,19 @@ export default function SessionWorkspacePage({
         <Pane title="Reason Tree">
           <ReasonTree events={events} />
         </Pane>
-        <Pane title="Web-TTY (只读流)">
-          <Terminal lines={terminalLines} />
+        <Pane title="Web-TTY + Takeover">
+          <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+            <div style={{ flex: 1, minHeight: 0 }}>
+              <Terminal lines={terminalLines} />
+            </div>
+            <ManualTakeover
+              command={manualCommand}
+              onCommandChange={setManualCommand}
+              onExec={handleManualExec}
+              busy={manualBusy}
+              disabled={!session || session.status === "SUCCESS" || session.status === "FAILED"}
+            />
+          </div>
         </Pane>
         <Pane title="Approve">
           <ApproveBar
@@ -206,6 +264,83 @@ export default function SessionWorkspacePage({
       </section>
     </main>
   );
+}
+
+function ManualTakeover({
+  command,
+  onCommandChange,
+  onExec,
+  busy,
+  disabled,
+}: {
+  command: string;
+  onCommandChange: (value: string) => void;
+  onExec: () => void;
+  busy: boolean;
+  disabled: boolean;
+}) {
+  return (
+    <div
+      style={{
+        borderTop: "1px solid var(--border)",
+        padding: 10,
+        display: "grid",
+        gap: 8,
+        background: "rgba(15, 23, 42, 0.55)",
+      }}
+    >
+      <div style={{ color: "var(--muted)", fontSize: 12 }}>
+        人工接管：在当前沙箱内执行一次命令；DENY 策略仍会阻断，执行结果进入审计。
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input
+          value={command}
+          onChange={(event) => onCommandChange(event.target.value)}
+          onKeyDown={(event) => event.key === "Enter" && onExec()}
+          disabled={disabled || busy}
+          placeholder="kubectl get pods -n ballast-demo"
+          style={{
+            flex: 1,
+            background: "var(--panel-2)",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+            color: "var(--text)",
+            padding: "9px 10px",
+            fontFamily: "var(--mono)",
+            fontSize: 12,
+          }}
+        />
+        <button
+          onClick={onExec}
+          disabled={disabled || busy || !command.trim()}
+          style={{
+            padding: "9px 12px",
+            borderRadius: 6,
+            border: "1px solid var(--border)",
+            background: "var(--panel-2)",
+            color: "var(--text)",
+            cursor: disabled || busy || !command.trim() ? "not-allowed" : "pointer",
+            opacity: disabled || busy || !command.trim() ? 0.5 : 1,
+            fontWeight: 700,
+          }}
+        >
+          {busy ? "执行中..." : "接管执行"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function mergeEvents(existing: EventEnvelope[], incoming: EventEnvelope[]): EventEnvelope[] {
+  const out: EventEnvelope[] = [];
+  const seen = new Set<string>();
+  for (const ev of [...existing, ...incoming]) {
+    const key = `${ev.type}:${JSON.stringify(ev.data ?? {})}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(ev);
+  }
+  return out;
 }
 
 function Pane({ title, children }: { title: string; children: React.ReactNode }) {
@@ -331,6 +466,14 @@ function toTerminalLines(events: EventEnvelope[]): string[] {
       case "policy.resumed":
         lines.push(`\x1b[32m[policy] resumed by ${ev.data?.approver}\x1b[0m`);
         break;
+      case "manual.command": {
+        const p = ev.data || {};
+        lines.push(`\x1b[36m[manual]\x1b[0m ${p.command}`);
+        if (typeof p.stdout === "string" && p.stdout) lines.push(p.stdout);
+        if (typeof p.stderr === "string" && p.stderr) lines.push(`\x1b[31m${p.stderr}\x1b[0m`);
+        if (typeof p.error === "string" && p.error) lines.push(`\x1b[31m[manual error] ${p.error}\x1b[0m`);
+        break;
+      }
       case "message.completed": {
         const p = ev.data || {};
         if (typeof p.text === "string") lines.push(`\x1b[36m[assistant] ${p.text}\x1b[0m`);
