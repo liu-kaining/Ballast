@@ -206,6 +206,7 @@ func (r *Router) createSession(w http.ResponseWriter, req *http.Request) {
 		AgentImage   string   `json:"agent_image"`
 		SkillIDs     []string `json:"skill_ids"`
 		MCPPluginIDs []string `json:"mcp_plugin_ids"`
+		WorkspaceDir string   `json:"workspace_dir"`
 	}
 	if err := decodeJSON(w, req, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -225,9 +226,14 @@ func (r *Router) createSession(w http.ResponseWriter, req *http.Request) {
 		TriggerType:  domain.TriggerManualChat,
 		SkillIDs:     body.SkillIDs,
 		MCPPluginIDs: body.MCPPluginIDs,
+		WorkspaceDir: body.WorkspaceDir,
 	})
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
+		status := http.StatusInternalServerError
+		if errors.Is(err, orchestrator.ErrInvalidCreateSessionOptions) {
+			status = http.StatusBadRequest
+		}
+		writeErr(w, status, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, session)

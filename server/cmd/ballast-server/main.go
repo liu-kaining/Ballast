@@ -67,6 +67,7 @@ func main() {
 		InternalToken:              cfg.Server.InternalToken,
 		RunnerCommand:              runtimeCfg.RunnerCommand,
 		RunnerArgs:                 runtimeCfg.RunnerArgs,
+		RunnerEnv:                  runtimeCfg.RunnerEnv,
 		KubeconfigPath:             runtimeCfg.KubeconfigPath,
 		RewriteLocalhostKubeconfig: runtimeCfg.RewriteLocalhostKubeconfig,
 		KubeNamespace:              runtimeCfg.KubeNamespace,

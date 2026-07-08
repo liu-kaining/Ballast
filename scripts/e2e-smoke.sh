@@ -5,12 +5,16 @@ api_base="${BALLAST_API_BASE:-http://localhost:8080}"
 admin_token="${BALLAST_ADMIN_TOKEN:-ballast-dev-admin-token}"
 internal_token="${BALLAST_INTERNAL_TOKEN:-ballast-dev-internal-token}"
 web_origin="${BALLAST_WEB_ORIGIN:-http://localhost:3000}"
+workspace_root="${BALLAST_WORKSPACE_ROOT:-/tmp/ballast/sandboxes}"
 cookie_jar="$(mktemp)"
 response_file="$(mktemp)"
 headers_file="$(mktemp)"
+mkdir -p "${workspace_root}"
+workspace_dir="$(mktemp -d "${workspace_root%/}/e2e-project.XXXXXX")"
 
 cleanup() {
   rm -f "${cookie_jar}" "${response_file}" "${headers_file}"
+  rm -rf "${workspace_dir}"
 }
 trap cleanup EXIT
 
@@ -47,6 +51,14 @@ wait_for_status() {
 }
 
 curl -fsS "${api_base}/healthz" >/dev/null
+
+git init -q "${workspace_dir}"
+git -C "${workspace_dir}" config user.email "e2e@example.invalid"
+git -C "${workspace_dir}" config user.name "Ballast E2E"
+printf 'baseline\n' > "${workspace_dir}/README.md"
+git -C "${workspace_dir}" add README.md
+git -C "${workspace_dir}" commit -q -m "baseline"
+printf 'uncommitted workspace change\n' > "${workspace_dir}/change.txt"
 
 code="$(status_code "${api_base}/api/sessions")"
 [[ "${code}" == "401" ]]
@@ -93,9 +105,10 @@ curl -fsS -b "${cookie_jar}" \
 mcp_count="$(curl -fsS -b "${cookie_jar}" "${api_base}/api/mcp-plugins" | json_len mcp_plugins)"
 (( mcp_count >= 1 ))
 
+session_payload="$(python3 -c 'import json,sys; print(json.dumps({"title":"e2e CrashLoopBackOff triage","skill_ids":["k8s-debug"],"mcp_plugin_ids":["prometheus"],"workspace_dir":sys.argv[1]}))' "${workspace_dir}")"
 session_json="$(curl -fsS -b "${cookie_jar}" \
   -H 'Content-Type: application/json' \
-  -d '{"title":"e2e CrashLoopBackOff triage","skill_ids":["k8s-debug"],"mcp_plugin_ids":["prometheus"]}' \
+  -d "${session_payload}" \
   "${api_base}/api/sessions")"
 session_id="$(printf '%s' "${session_json}" | json_field session_id)"
 
@@ -119,6 +132,10 @@ docker exec "ballast-sbx-${session_id}" \
   test -f /workspace/.opencode/skills/k8s-debug/SKILL.md
 docker exec "ballast-sbx-${session_id}" \
   grep -q 'prometheus-mcp' /workspace/.opencode/mcp_config.json
+docker exec "ballast-sbx-${session_id}" \
+  test -d /workspace/project/.git
+docker exec "ballast-sbx-${session_id}" \
+  grep -q 'uncommitted workspace change' /workspace/project/change.txt
 
 audit_before="$(docker compose exec -T postgres psql -U ballast -d ballast -Atc \
   "SELECT policy_decision || ':' || count(*) FROM ballast_audit_logs WHERE session_id='${session_id}' GROUP BY policy_decision ORDER BY policy_decision")"

@@ -3,6 +3,7 @@
 #   - harness-agent（PTY 劫持 + 指令拦截网关）
 #   - mock-opencode（稳定回归测试路径）
 #   - ballast-real-k8s-runner（真实 kubectl / Kubernetes API 场景）
+#   - ballast-git-pr-runner（真实 Git/IaC 工作区提交场景）
 #   - 基础 SRE CLI（真实 kubectl + 常用诊断工具）
 FROM golang:1.26.4-alpine AS build
 WORKDIR /src
@@ -38,7 +39,8 @@ COPY --from=build /harness-agent /usr/local/bin/harness-agent
 # mock-opencode：模拟 opencode serve --format json 的最小 HTTP server
 COPY sandbox-image/mock-opencode /usr/local/bin/mock-opencode
 COPY sandbox-image/ballast-real-k8s-runner /usr/local/bin/ballast-real-k8s-runner
-RUN chmod +x /usr/local/bin/mock-opencode /usr/local/bin/ballast-real-k8s-runner
+COPY sandbox-image/ballast-git-pr-runner /usr/local/bin/ballast-git-pr-runner
+RUN chmod +x /usr/local/bin/mock-opencode /usr/local/bin/ballast-real-k8s-runner /usr/local/bin/ballast-git-pr-runner
 
 # Skill 挂载点（运行时由控制面动态注入到 /workspace/.opencode/skills/）
 RUN mkdir -p /workspace/.opencode/skills /workspace/.kube

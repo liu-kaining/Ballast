@@ -18,6 +18,16 @@ runtime_provider:
     control_plane_url: "${BALLAST_CONTROL_PLANE_URL:-http://host.docker.internal:8080}"
     runner_command: "${BALLAST_RUNNER_COMMAND:-/usr/local/bin/mock-opencode}"
     runner_args: "${BALLAST_RUNNER_ARGS:-}"
+    runner_env:
+      BALLAST_GIT_BRANCH: "${BALLAST_GIT_BRANCH:-}"
+      BALLAST_GIT_BRANCH_PREFIX: "${BALLAST_GIT_BRANCH_PREFIX:-ballast}"
+      BALLAST_GIT_COMMIT_MESSAGE: "${BALLAST_GIT_COMMIT_MESSAGE:-ballast: automated workspace update}"
+      BALLAST_GIT_PUSH: "${BALLAST_GIT_PUSH:-}"
+      BALLAST_GIT_REMOTE: "${BALLAST_GIT_REMOTE:-origin}"
+      BALLAST_GIT_PR_URL_TEMPLATE: "${BALLAST_GIT_PR_URL_TEMPLATE:-}"
+      BALLAST_GIT_AUTHOR_NAME: "${BALLAST_GIT_AUTHOR_NAME:-Ballast Automation}"
+      BALLAST_GIT_AUTHOR_EMAIL: "${BALLAST_GIT_AUTHOR_EMAIL:-ballast@example.invalid}"
+      BALLAST_TERRAFORM_VALIDATE: "${BALLAST_TERRAFORM_VALIDATE:-}"
     kubeconfig_path: "${BALLAST_KUBECONFIG:-}"
     rewrite_localhost_kubeconfig: ${BALLAST_KUBECONFIG_REWRITE_LOCALHOST:-true}
     kube_namespace: "${BALLAST_KUBE_NAMESPACE:-ballast-demo}"

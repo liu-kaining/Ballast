@@ -292,6 +292,46 @@ func TestCreateSessionMaterializesMCPConfig(t *testing.T) {
 	}
 }
 
+func TestCreateSessionMountsWorkspaceDir(t *testing.T) {
+	manager, _, _, sandbox := newTestManager()
+	workspaceDir := t.TempDir()
+	session, err := manager.CreateSessionWithOptions(context.Background(), CreateSessionOptions{
+		Title:        "with workspace",
+		WorkspaceDir: workspaceDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.SessionID == "" {
+		t.Fatal("empty session id")
+	}
+	sandbox.mu.Lock()
+	defer sandbox.mu.Unlock()
+	if len(sandbox.mounts) != 1 || sandbox.mounts[0].WorkspaceDir != workspaceDir {
+		t.Fatalf("mounts = %#v, want workspace %s", sandbox.mounts, workspaceDir)
+	}
+}
+
+func TestCreateSessionRejectsInvalidWorkspaceDir(t *testing.T) {
+	manager, _, _, sandbox := newTestManager()
+	for _, workspaceDir := range []string{"relative/project", string(filepath.Separator)} {
+		t.Run(workspaceDir, func(t *testing.T) {
+			_, err := manager.CreateSessionWithOptions(context.Background(), CreateSessionOptions{
+				Title:        "bad workspace",
+				WorkspaceDir: workspaceDir,
+			})
+			if !errors.Is(err, ErrInvalidCreateSessionOptions) {
+				t.Fatalf("err = %v, want ErrInvalidCreateSessionOptions", err)
+			}
+		})
+	}
+	sandbox.mu.Lock()
+	defer sandbox.mu.Unlock()
+	if len(sandbox.created) != 0 {
+		t.Fatalf("sandbox should not be created for invalid workspace: %v", sandbox.created)
+	}
+}
+
 func TestSessionLifecycleRequiresCommandSpecificApproval(t *testing.T) {
 	manager, _, audit, _ := newTestManager()
 	session, err := manager.CreateSession(context.Background(), "test", "")

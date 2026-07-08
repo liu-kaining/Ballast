@@ -9,6 +9,7 @@
 - ✅ Harness-Agent（PTY 劫持 + 指令拦截 + gRPC proto 契约）
 - ✅ OPA 策略引擎（Rego 热加载 + 三决策路径单测）
 - ✅ Skill 资产基础 API + 手工会话只读挂载
+- ✅ Git/IaC 工作区挂载（`workspace_dir` → `/workspace/project`）
 - ✅ Trigger Rule 资产基础 API
 - ✅ 会话审计 API + 工作区 Audit Trail
 - ✅ Mock OpenCode 引擎（K8s CrashLoopBackOff 排障剧本）
@@ -29,14 +30,14 @@
 - [x] **Skill IDE**：资产中心提供 Skill Markdown、Trigger Rule JSON、MCP Plugin JSON 编辑与发布
 - [x] **MCP 插件中心基础能力**：注册 MCP server，任务拉起时生成 `mcp_config.json` 并只读挂载进沙箱；真实 OpenCode 下可通过 client `POST /mcp` 注入
 - [x] **审计事件回放**：`ballast_session_events` 持久化 Reason/TTY/Policy 事件，历史会话可回放；对象存储原始录像仍可作为生产增强
-- [ ] **Git PR 自动提交**：场景 B 演进态，沙箱内 git 提交分支并向 GitLab 推送 PR
+- [x] **Git PR 自动提交**：`ballast-git-pr-runner` 在真实挂载 Git 工作区内读取变更；branch/add/commit/push 均经 Ballast 审批，远端 PR/MR 链接通过模板生成
 
 ## v0.4 — 执行面强化
 
 - [ ] **E2B Firecracker MicroVM Runtime**：实现 `SandboxRuntime` 接口的 E2B 版，更强隔离
 - [ ] **ClickHouse 审计下沉**：高并发 TTY 日志迁出 PostgreSQL
 - [ ] **多模型分发**：`model_router` 按 Plan/Act 阶段路由强推理 vs 快速模型
-- [ ] **配置漂移自愈巡检**：Cron 任务 + terraform plan 漂移检测 + 自动生成回滚 PR
+- [ ] **配置漂移自愈巡检**：Cron 任务 + 真实 Terraform/OpenTofu plan 漂移检测 + 自动生成回滚 PR
 
 ## 待评估
 

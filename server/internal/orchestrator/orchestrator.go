@@ -122,6 +122,7 @@ type CreateSessionOptions struct {
 	TriggerType  domain.TriggerType
 	SkillIDs     []string
 	MCPPluginIDs []string
+	WorkspaceDir string
 }
 
 type ManualCommandResult struct {
@@ -184,7 +185,7 @@ func (m *Manager) CreateSessionWithOptions(ctx context.Context, opts CreateSessi
 
 	now := time.Now().UTC()
 	sessionID := genID()
-	mounts, cleanup, err := m.prepareAssetMounts(ctx, sessionID, opts.SkillIDs, opts.MCPPluginIDs)
+	mounts, cleanup, err := m.prepareAssetMounts(ctx, sessionID, opts.WorkspaceDir, opts.SkillIDs, opts.MCPPluginIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -738,34 +739,44 @@ func genID() string {
 
 var skillIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
 
-func (m *Manager) prepareAssetMounts(ctx context.Context, sessionID string, skillIDs, mcpPluginIDs []string) (runtime.Mounts, func(), error) {
+var ErrInvalidCreateSessionOptions = errors.New("invalid create session options")
+
+func (m *Manager) prepareAssetMounts(ctx context.Context, sessionID, workspaceDir string, skillIDs, mcpPluginIDs []string) (runtime.Mounts, func(), error) {
+	mounts := runtime.Mounts{}
+	cleanup := func() {}
+	if workspaceDir != "" {
+		workspaceMount, err := validateWorkspaceDir(workspaceDir)
+		if err != nil {
+			return runtime.Mounts{}, cleanup, err
+		}
+		mounts.WorkspaceDir = workspaceMount
+	}
 	if len(skillIDs) == 0 && len(mcpPluginIDs) == 0 {
-		return runtime.Mounts{}, func() {}, nil
+		return mounts, cleanup, nil
 	}
 	if len(skillIDs) > 0 && m.skillsRepo == nil {
-		return runtime.Mounts{}, func() {}, errors.New("skill repository is not configured")
+		return runtime.Mounts{}, cleanup, errors.New("skill repository is not configured")
 	}
 	if len(mcpPluginIDs) > 0 && m.mcpRepo == nil {
-		return runtime.Mounts{}, func() {}, errors.New("mcp plugin repository is not configured")
+		return runtime.Mounts{}, cleanup, errors.New("mcp plugin repository is not configured")
 	}
 	root := m.workspaceRoot
 	if root == "" {
 		root = filepath.Join(os.TempDir(), "ballast", "sandboxes")
 	}
 	if !filepath.IsAbs(root) {
-		return runtime.Mounts{}, func() {}, fmt.Errorf("workspace root must be absolute: %s", root)
+		return runtime.Mounts{}, cleanup, fmt.Errorf("workspace root must be absolute: %s", root)
 	}
 	sessionRoot := filepath.Join(root, sessionID)
 	skillsRoot := filepath.Join(sessionRoot, "skills")
 	mcpConfigPath := filepath.Join(sessionRoot, "mcp_config.json")
-	cleanup := func() {
+	cleanup = func() {
 		_ = os.RemoveAll(sessionRoot)
 	}
 	if err := os.MkdirAll(sessionRoot, 0o755); err != nil {
 		return runtime.Mounts{}, cleanup, fmt.Errorf("create session workspace: %w", err)
 	}
 
-	mounts := runtime.Mounts{}
 	if len(skillIDs) > 0 {
 		if err := os.MkdirAll(skillsRoot, 0o755); err != nil {
 			return runtime.Mounts{}, cleanup, fmt.Errorf("create skills mount: %w", err)
@@ -789,6 +800,27 @@ func (m *Manager) prepareAssetMounts(ctx context.Context, sessionID string, skil
 		})
 	}
 	return mounts, cleanup, nil
+}
+
+func validateWorkspaceDir(raw string) (string, error) {
+	workspaceDir := filepath.Clean(strings.TrimSpace(raw))
+	if workspaceDir == "." || workspaceDir == "" {
+		return "", nil
+	}
+	if !filepath.IsAbs(workspaceDir) {
+		return "", fmt.Errorf("%w: workspace_dir must be absolute: %s", ErrInvalidCreateSessionOptions, raw)
+	}
+	if workspaceDir == string(filepath.Separator) {
+		return "", fmt.Errorf("%w: refusing to mount filesystem root as workspace_dir", ErrInvalidCreateSessionOptions)
+	}
+	info, err := os.Stat(workspaceDir)
+	if err != nil {
+		return "", fmt.Errorf("%w: workspace_dir %s is not accessible: %v", ErrInvalidCreateSessionOptions, workspaceDir, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("%w: workspace_dir must be a directory: %s", ErrInvalidCreateSessionOptions, workspaceDir)
+	}
+	return workspaceDir, nil
 }
 
 func (m *Manager) materializeSkills(ctx context.Context, skillsRoot string, skillIDs []string) error {

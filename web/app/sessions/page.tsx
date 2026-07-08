@@ -35,6 +35,7 @@ export default function SessionsPage() {
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState("K8s CrashLoopBackOff 排障");
+  const [workspaceDir, setWorkspaceDir] = useState("");
   const [authRequired, setAuthRequired] = useState(false);
   const [token, setToken] = useState("");
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -85,7 +86,8 @@ export default function SessionsPage() {
         title,
         "ballast-runner-base:dev",
         selectedSkillIDs,
-        selectedMCPPluginIDs
+        selectedMCPPluginIDs,
+        workspaceDir
       );
       await refresh();
     } catch (e: unknown) {
@@ -257,6 +259,7 @@ export default function SessionsPage() {
           padding: 16,
           marginBottom: 24,
           display: "flex",
+          flexWrap: "wrap",
           gap: 12,
           alignItems: "center",
         }}
@@ -267,6 +270,20 @@ export default function SessionsPage() {
           placeholder="会话标题 / 意图描述"
           style={{
             flex: 1,
+            background: "var(--panel-2)",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+            color: "var(--text)",
+            padding: "10px 12px",
+            fontFamily: "inherit",
+          }}
+        />
+        <input
+          value={workspaceDir}
+          onChange={(e) => setWorkspaceDir(e.target.value)}
+          placeholder="可选：宿主机 Git/IaC 工作区绝对路径，如 /tmp/ballast/sandboxes/demo-repo"
+          style={{
+            flex: "1 1 100%",
             background: "var(--panel-2)",
             border: "1px solid var(--border)",
             borderRadius: 6,

@@ -123,8 +123,10 @@ export async function createSession(
   title: string,
   agentImage = "ballast-runner-base:dev",
   skillIDs: string[] = [],
-  mcpPluginIDs: string[] = []
+  mcpPluginIDs: string[] = [],
+  workspaceDir = ""
 ): Promise<Session> {
+  const normalizedWorkspaceDir = workspaceDir.trim();
   const res = await fetch(`${API_BASE}/api/sessions`, {
     ...requestDefaults,
     method: "POST",
@@ -134,6 +136,7 @@ export async function createSession(
       agent_image: agentImage,
       skill_ids: skillIDs,
       mcp_plugin_ids: mcpPluginIDs,
+      workspace_dir: normalizedWorkspaceDir || undefined,
     }),
   });
   if (!res.ok) throw new APIError("createSession", res.status);

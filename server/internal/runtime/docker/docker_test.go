@@ -43,7 +43,12 @@ func TestCreateBuildsHardenedContainerCommand(t *testing.T) {
 			DefaultImage:    "ballast-runner-base:test",
 			ControlPlaneURL: "http://host.docker.internal:8080",
 			InternalToken:   "internal-secret",
-			DockerBinary:    "docker",
+			RunnerEnv: map[string]string{
+				"BALLAST_GIT_PUSH":            "1",
+				"BALLAST_GIT_PR_URL_TEMPLATE": "https://gitlab.example/new?branch={branch}",
+				"bad-name":                    "ignored",
+			},
+			DockerBinary: "docker",
 		},
 		runner: runner,
 	}
@@ -64,10 +69,15 @@ func TestCreateBuildsHardenedContainerCommand(t *testing.T) {
 		"BALLAST_INTERNAL_TOKEN=internal-secret",
 		"BALLAST_CHILD=/usr/local/bin/mock-opencode",
 		"ballast-runner-base:test",
+		"BALLAST_GIT_PUSH=1",
+		"BALLAST_GIT_PR_URL_TEMPLATE=https://gitlab.example/new?branch={branch}",
 	} {
 		if !strings.Contains(command, required) {
 			t.Fatalf("docker run command missing %q: %s", required, command)
 		}
+	}
+	if strings.Contains(command, "bad-name") {
+		t.Fatalf("docker run command contains invalid env name: %s", command)
 	}
 }
 
@@ -125,6 +135,31 @@ func TestCreateMountsRewrittenKubeconfig(t *testing.T) {
 	}
 	if _, err := os.Stat(rewritten); !os.IsNotExist(err) {
 		t.Fatalf("runtime kubeconfig was not cleaned up: %v", err)
+	}
+}
+
+func TestCreateMountsWorkspaceDir(t *testing.T) {
+	workspaceDir := t.TempDir()
+	runner := &fakeRunner{}
+	r := &DockerRuntime{
+		config: Config{
+			MaxCPUCores:     2,
+			MaxMemoryMB:     512,
+			DefaultImage:    "ballast-runner-base:test",
+			ControlPlaneURL: "http://host.docker.internal:8080",
+			InternalToken:   "internal-secret",
+			DockerBinary:    "docker",
+		},
+		runner: runner,
+	}
+
+	if _, err := r.Create(context.Background(), "sess-workspace", "", runtime.Mounts{WorkspaceDir: workspaceDir}); err != nil {
+		t.Fatal(err)
+	}
+	command := strings.Join(runner.calls[0].args, " ")
+	want := "src=" + workspaceDir + ",dst=/workspace/project"
+	if !strings.Contains(command, want) {
+		t.Fatalf("docker run command missing %q: %s", want, command)
 	}
 }
 

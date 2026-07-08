@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+"""Git/IaC workspace runner for Ballast.
+
+The runner operates on the host workspace mounted at /workspace/project. It
+uses the same JSON-line protocol as mock-opencode and ballast-real-k8s-runner:
+each shell-visible command is emitted as a tool.call and waits for the
+harness-agent policy decision before execution.
+
+Safe read-only git commands are auto-approved by the default OPA policy.
+Branch creation, staging, commit and push are write operations and therefore
+enter a Ballast approval breakpoint.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+from pathlib import Path
+from urllib.parse import quote
+
+
+VERSION = "0.1.0"
+WORKSPACE = Path(os.environ.get("BALLAST_PROJECT_DIR", "/workspace/project"))
+
+
+def env(name: str, fallback: str = "") -> str:
+    return os.environ.get(name, "").strip() or fallback
+
+
+def enabled(name: str) -> bool:
+    return env(name).lower() in {"1", "true", "yes", "on"}
+
+
+def emit(event_type: str, properties: dict) -> None:
+    print(
+        json.dumps(
+            {"type": event_type, "properties": properties},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
+
+
+def reason(index: int, title: str, thought: str) -> None:
+    emit("reason.step", {"index": index, "title": title, "thought": thought})
+
+
+def wait_decision() -> str:
+    line = sys.stdin.readline()
+    if not line:
+        return "DENY"
+    return line.strip().upper()
+
+
+def git_env() -> dict[str, str]:
+    runtime_env = os.environ.copy()
+    runtime_env.update(
+        {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "safe.directory",
+            "GIT_CONFIG_VALUE_0": str(WORKSPACE),
+            "GIT_AUTHOR_NAME": env("BALLAST_GIT_AUTHOR_NAME", "Ballast Automation"),
+            "GIT_AUTHOR_EMAIL": env("BALLAST_GIT_AUTHOR_EMAIL", "ballast@example.invalid"),
+            "GIT_COMMITTER_NAME": env("BALLAST_GIT_AUTHOR_NAME", "Ballast Automation"),
+            "GIT_COMMITTER_EMAIL": env("BALLAST_GIT_AUTHOR_EMAIL", "ballast@example.invalid"),
+        }
+    )
+    return runtime_env
+
+
+def run_tool(args: list[str], timeout_seconds: int = 120) -> tuple[bool, str, str]:
+    command = shlex.join(args)
+    emit("tool.call", {"tool": "bash", "command": command})
+    decision = wait_decision()
+    if decision != "APPROVE":
+        emit(
+            "tool.result",
+            {
+                "command": command,
+                "decision": decision or "DENY",
+                "exit_code": None,
+                "stdout": "",
+                "stderr": "blocked by Ballast policy",
+            },
+        )
+        return False, "", "blocked by Ballast policy"
+
+    try:
+        completed = subprocess.run(
+            args,
+            cwd=WORKSPACE,
+            env=git_env(),
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = (exc.stderr or "") + f"\ncommand timed out after {timeout_seconds}s"
+        emit(
+            "tool.result",
+            {
+                "command": command,
+                "decision": "APPROVE",
+                "exit_code": 124,
+                "stdout": stdout,
+                "stderr": stderr.strip(),
+            },
+        )
+        emit("error", {"message": f"command timed out: {command}"})
+        return False, stdout, stderr
+
+    emit(
+        "tool.result",
+        {
+            "command": command,
+            "decision": "APPROVE",
+            "exit_code": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+        },
+    )
+    if completed.returncode != 0:
+        emit(
+            "error",
+            {
+                "message": "workspace command failed",
+                "command": command,
+                "exit_code": completed.returncode,
+            },
+        )
+        return False, completed.stdout, completed.stderr
+    return True, completed.stdout, completed.stderr
+
+
+def sanitize_branch_part(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-._")
+    return cleaned[:64] or str(int(time.time()))
+
+
+def branch_name() -> str:
+    explicit = env("BALLAST_GIT_BRANCH")
+    if explicit:
+        return explicit
+    prefix = env("BALLAST_GIT_BRANCH_PREFIX", "ballast").strip("/ ")
+    session_part = sanitize_branch_part(env("BALLAST_SESSION_ID", "session"))
+    return f"{prefix}/{session_part}" if prefix else session_part
+
+
+def has_terraform_files() -> bool:
+    return any(WORKSPACE.glob("*.tf")) or any(WORKSPACE.glob("**/*.tf"))
+
+
+def pr_url_for(branch: str) -> str:
+    template = env("BALLAST_GIT_PR_URL_TEMPLATE")
+    if not template:
+        return ""
+    encoded = quote(branch, safe="")
+    return template.replace("{branch}", encoded).replace("{branch_raw}", branch)
+
+
+def main() -> int:
+    emit(
+        "server.connected",
+        {
+            "server": "ballast-git-pr-runner",
+            "version": VERSION,
+            "workspace": str(WORKSPACE),
+            "push_enabled": enabled("BALLAST_GIT_PUSH"),
+        },
+    )
+
+    if not WORKSPACE.exists() or not WORKSPACE.is_dir():
+        emit("error", {"message": f"workspace is not mounted: {WORKSPACE}"})
+        return 1
+    if not (WORKSPACE / ".git").exists():
+        emit("error", {"message": f"workspace is not a git repository: {WORKSPACE}"})
+        return 1
+
+    reason(1, "读取 Git 工作区", "检查挂载进沙箱的真实 Git/IaC 工作区当前变更。")
+    ok, status, _ = run_tool(["git", "status", "--short"])
+    if not ok:
+        return 1
+
+    if status.strip():
+        if not run_tool(["git", "diff", "--stat"])[0]:
+            return 1
+    else:
+        emit(
+            "message.completed",
+            {
+                "role": "assistant",
+                "text": "Git 工作区已检查：当前没有未提交变更，无需创建分支或提交。",
+            },
+        )
+        return 0
+
+    if enabled("BALLAST_TERRAFORM_VALIDATE") and has_terraform_files():
+        reason(2, "校验 Terraform 变更", "检测到 .tf 文件；执行 terraform validate。生产镜像应安装企业批准的真实 Terraform/OpenTofu。")
+        if not run_tool(["terraform", "validate", "-no-color"], timeout_seconds=180)[0]:
+            return 1
+        next_reason = 3
+    else:
+        next_reason = 2
+
+    branch = branch_name()
+    reason(next_reason, "创建变更分支", "即将切换/创建 Git 分支；这是写操作，必须通过 Ballast 审批。")
+    if not run_tool(["git", "checkout", "-B", branch])[0]:
+        return 1
+
+    reason(next_reason + 1, "暂存并提交变更", "将当前工作区变更写入一个可审计提交；git add/commit 均需审批。")
+    if not run_tool(["git", "add", "-A"])[0]:
+        return 1
+    if not run_tool(["git", "diff", "--cached", "--stat"])[0]:
+        return 1
+
+    message = env("BALLAST_GIT_COMMIT_MESSAGE", "ballast: automated workspace update")
+    if not run_tool(["git", "commit", "-m", message], timeout_seconds=180)[0]:
+        return 1
+
+    if enabled("BALLAST_GIT_PUSH"):
+        remote = env("BALLAST_GIT_REMOTE", "origin")
+        reason(next_reason + 2, "推送远端分支", "远端 push 会离开本机边界，必须通过 Ballast 审批。")
+        if not run_tool(["git", "push", "-u", remote, branch], timeout_seconds=300)[0]:
+            return 1
+        pr_url = pr_url_for(branch)
+        text = f"Git 工作区变更已提交并推送到 {remote}/{branch}。"
+        if pr_url:
+            text += f" PR/MR 创建链接：{pr_url}"
+    else:
+        text = (
+            f"Git 工作区变更已在沙箱挂载仓库创建本地分支 {branch} 并完成提交。"
+            "如需推送远端并生成 PR 链接，请配置 BALLAST_GIT_PUSH=1、远端凭据和 BALLAST_GIT_PR_URL_TEMPLATE。"
+        )
+
+    emit(
+        "message.completed",
+        {
+            "role": "assistant",
+            "text": text,
+            "branch": branch,
+            "pushed": enabled("BALLAST_GIT_PUSH"),
+            "pr_url": pr_url_for(branch) if enabled("BALLAST_GIT_PUSH") else "",
+        },
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

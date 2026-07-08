@@ -22,6 +22,8 @@ func TestLoadAppliesEnvironmentOverrides(t *testing.T) {
 	t.Setenv("BALLAST_POLICY_DIR", "/tmp/policies")
 	t.Setenv("BALLAST_CONTROL_PLANE_URL", "http://control:8080")
 	t.Setenv("BALLAST_RUNNER_COMMAND", "/usr/local/bin/ballast-real-k8s-runner")
+	t.Setenv("BALLAST_GIT_PUSH", "1")
+	t.Setenv("BALLAST_GIT_PR_URL_TEMPLATE", "https://gitlab.example/new?branch={branch}")
 	t.Setenv("BALLAST_KUBECONFIG", "/tmp/ballast/real-k8s/kubeconfig.sandbox.yaml")
 
 	raw, err := os.ReadFile(filepath.Join("..", "..", "configs", "ballast.yaml"))
@@ -48,6 +50,12 @@ func TestLoadAppliesEnvironmentOverrides(t *testing.T) {
 	}
 	if cfg.RuntimeProvider.Config.RunnerCommand != "/usr/local/bin/ballast-real-k8s-runner" {
 		t.Fatalf("runner command = %q", cfg.RuntimeProvider.Config.RunnerCommand)
+	}
+	if cfg.RuntimeProvider.Config.RunnerEnv["BALLAST_GIT_PUSH"] != "1" {
+		t.Fatalf("runner env BALLAST_GIT_PUSH = %q", cfg.RuntimeProvider.Config.RunnerEnv["BALLAST_GIT_PUSH"])
+	}
+	if cfg.RuntimeProvider.Config.RunnerEnv["BALLAST_GIT_PR_URL_TEMPLATE"] != "https://gitlab.example/new?branch={branch}" {
+		t.Fatalf("runner env BALLAST_GIT_PR_URL_TEMPLATE = %q", cfg.RuntimeProvider.Config.RunnerEnv["BALLAST_GIT_PR_URL_TEMPLATE"])
 	}
 	if cfg.RuntimeProvider.Config.KubeconfigPath != "/tmp/ballast/real-k8s/kubeconfig.sandbox.yaml" {
 		t.Fatalf("kubeconfig path = %q", cfg.RuntimeProvider.Config.KubeconfigPath)

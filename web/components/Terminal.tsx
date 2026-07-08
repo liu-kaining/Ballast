@@ -10,8 +10,8 @@ interface Props {
   lines: string[];
 }
 
-// Terminal 用 xterm.js 渲染只读 TTY 流。
-// v0.1 仅只读；v0.2 接入真实 opencode 后开放双向写。
+// Terminal 用 xterm.js 渲染 TTY/工具输出流。
+// 人工接管输入走 /terminal/exec API，仍由 OPA 审批并进入审计。
 export default function Terminal({ lines }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);

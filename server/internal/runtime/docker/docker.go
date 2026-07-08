@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -27,6 +28,7 @@ type Config struct {
 	InternalToken              string
 	RunnerCommand              string
 	RunnerArgs                 string
+	RunnerEnv                  map[string]string
 	KubeconfigPath             string
 	RewriteLocalhostKubeconfig bool
 	KubeNamespace              string
@@ -127,6 +129,7 @@ func (r *DockerRuntime) Create(ctx context.Context, sessionID, imageName string,
 		"-e", "BALLAST_AGENT_NAME=" + filepath.Base(runnerCommand),
 	}
 	args = append(args, r.realK8sEnv()...)
+	args = append(args, r.runnerEnv()...)
 
 	mountArgs, err := buildMountArgs(vol)
 	if err != nil {
@@ -179,6 +182,32 @@ func (r *DockerRuntime) realK8sEnv() []string {
 	add("BALLAST_TARGET_SELECTOR", r.config.KubeTargetSelector)
 	add("BALLAST_TARGET_DEPLOYMENT", r.config.KubeTargetDeployment)
 	add("BALLAST_FIX_CONFIGMAP", r.config.KubeFixConfigMap)
+	return out
+}
+
+var safeEnvName = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+
+func (r *DockerRuntime) runnerEnv() []string {
+	if len(r.config.RunnerEnv) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(r.config.RunnerEnv))
+	for key := range r.config.RunnerEnv {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys)*2)
+	for _, key := range keys {
+		trimmedKey := strings.TrimSpace(key)
+		if !safeEnvName.MatchString(trimmedKey) {
+			continue
+		}
+		value := strings.TrimSpace(r.config.RunnerEnv[key])
+		if value == "" {
+			continue
+		}
+		out = append(out, "-e", trimmedKey+"="+value)
+	}
 	return out
 }
 
